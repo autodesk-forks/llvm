@@ -375,12 +375,25 @@ static bool usesTheStack(const MachineFunction &MF) {
   return false;
 }
 
-void X86FrameLowering::getStackProbeFunction(const X86Subtarget &STI,
-                                             unsigned &CallOp,
-                                             const char *&Symbol) {
-  CallOp = STI.is64Bit() ? X86::W64ALLOCA : X86::CALLpcrel32;
+void X86FrameLowering::emitStackProbeCall(MachineFunction &MF,
+                                          MachineBasicBlock &MBB,
+                                          MachineBasicBlock::iterator MBBI,
+                                          DebugLoc DL) {
+  const TargetInstrInfo &TII = *MF.getSubtarget().getInstrInfo();
+  const X86Subtarget &STI = MF.getTarget().getSubtarget<X86Subtarget>();
+  bool Is64Bit = STI.is64Bit();
+  bool IsLargeCodeModel = MF.getTarget().getCodeModel() == CodeModel::Large;
+  const X86RegisterInfo *RegInfo =
+      static_cast<const X86RegisterInfo *>(MF.getSubtarget().getRegisterInfo());
 
-  if (STI.is64Bit()) {
+  unsigned CallOp;
+  if (Is64Bit)
+    CallOp = IsLargeCodeModel ? X86::CALL64r : X86::CALL64pcrel32;
+  else
+    CallOp = X86::CALLpcrel32;
+
+  const char *Symbol;
+  if (Is64Bit) {
     if (STI.isTargetCygMing()) {
       Symbol = "___chkstk_ms";
     } else {
@@ -390,6 +403,37 @@ void X86FrameLowering::getStackProbeFunction(const X86Subtarget &STI,
     Symbol = "_alloca";
   else
     Symbol = "_chkstk";
+
+  MachineInstrBuilder CI;
+
+  // All current stack probes take AX and SP as input, clobber flags, and
+  // preserve all registers. x86_64 probes leave RSP unmodified.
+  if (Is64Bit && MF.getTarget().getCodeModel() == CodeModel::Large) {
+    // For the large code model, we have to call through a register. Use R11,
+    // as it is scratch in all supported calling conventions.
+    BuildMI(MBB, MBBI, DL, TII.get(X86::MOV64ri), X86::R11)
+        .addExternalSymbol(Symbol);
+    CI = BuildMI(MBB, MBBI, DL, TII.get(CallOp)).addReg(X86::R11);
+  } else {
+    CI = BuildMI(MBB, MBBI, DL, TII.get(CallOp)).addExternalSymbol(Symbol);
+  }
+
+  unsigned AX = Is64Bit ? X86::RAX : X86::EAX;
+  unsigned SP = Is64Bit ? X86::RSP : X86::ESP;
+  CI.addReg(AX, RegState::Implicit)
+      .addReg(SP, RegState::Implicit)
+      .addReg(AX, RegState::Define | RegState::Implicit)
+      .addReg(SP, RegState::Define | RegState::Implicit)
+      .addReg(X86::EFLAGS, RegState::Define | RegState::Implicit);
+
+  if (Is64Bit) {
+    // MSVC x64's __chkstk and cygwin/mingw's ___chkstk_ms do not adjust %rsp
+    // themselves. It also does not clobber %rax so we can reuse it when
+    // adjusting %rsp.
+    BuildMI(MBB, MBBI, DL, TII.get(X86::SUB64rr), X86::RSP)
+        .addReg(X86::RSP)
+        .addReg(X86::RAX);
+  }
 }
 
 /// emitPrologue - Push callee-saved registers onto the stack, which
@@ -722,11 +766,6 @@ void X86FrameLowering::emitPrologue(MachineFunction &MF) const {
   // increments is necessary to ensure that the guard pages used by the OS
   // virtual memory manager are allocated in correct sequence.
   if (NumBytes >= StackProbeSize && UseStackProbe) {
-    const char *StackProbeSymbol;
-    unsigned CallOp;
-
-    getStackProbeFunction(STI, CallOp, StackProbeSymbol);
-
     // Check whether EAX is livein for this function.
     bool isEAXAlive = isEAXLiveIn(MF);
 
@@ -741,51 +780,31 @@ void X86FrameLowering::emitPrologue(MachineFunction &MF) const {
         .setMIFlag(MachineInstr::FrameSetup);
     }
 
-    MachineInstrBuilder MIB;
-
     if (Is64Bit) {
       // Handle the 64-bit Windows ABI case where we need to call __chkstk.
       // Function prologue is responsible for adjusting the stack pointer.
       BuildMI(MBB, MBBI, DL, TII.get(X86::MOV64ri), X86::RAX)
         .addImm(NumBytes)
         .setMIFlag(MachineInstr::FrameSetup);
-
-      // R11 will be used to contain the address of __chkstk.
-      // R11 is a volatile register and assumed to be destroyed by the callee, 
-      // so there is no need to save and restore it.
-      BuildMI(MBB, MBBI, DL, TII.get(X86::MOV64ri), X86::R11)
-        .addExternalSymbol(StackProbeSymbol);
-
-      // Create a call to __chkstk function which address contained in R11.
-      MIB = BuildMI(MBB, MBBI, DL, TII.get(X86::CALL64r))
-              .addReg(X86::R11, RegState::Kill);
     } else {
       // Allocate NumBytes-4 bytes on stack in case of isEAXAlive.
       // We'll also use 4 already allocated bytes for EAX.
       BuildMI(MBB, MBBI, DL, TII.get(X86::MOV32ri), X86::EAX)
         .addImm(isEAXAlive ? NumBytes - 4 : NumBytes)
         .setMIFlag(MachineInstr::FrameSetup);
-
-      MIB = BuildMI(MBB, MBBI, DL, TII.get(X86::CALLpcrel32))
-              .addExternalSymbol(StackProbeSymbol);
     }
 
-    BuildMI(MBB, MBBI, DL,
-            TII.get(CallOp))
-      .addExternalSymbol(StackProbeSymbol)
-      .addReg(StackPtr,    RegState::Define | RegState::Implicit)
-      .addReg(X86::EFLAGS, RegState::Define | RegState::Implicit)
-      .setMIFlag(MachineInstr::FrameSetup);
+    // Save a pointer to the MI where we set AX.
+    MachineBasicBlock::iterator SetRAX = MBBI;
+    --SetRAX;
 
-    if (Is64Bit) {
-      // MSVC x64's __chkstk and cygwin/mingw's ___chkstk_ms do not adjust %rsp
-      // themselves. It also does not clobber %rax so we can reuse it when
-      // adjusting %rsp.
-      BuildMI(MBB, MBBI, DL, TII.get(X86::SUB64rr), StackPtr)
-        .addReg(StackPtr)
-        .addReg(X86::RAX)
-        .setMIFlag(MachineInstr::FrameSetup);
-    }
+    // Call __chkstk, __chkstk_ms, or __alloca.
+    emitStackProbeCall(MF, MBB, MBBI, DL);
+
+    // Apply the frame setup flag to all inserted instrs.
+    for (; SetRAX != MBBI; ++SetRAX)
+      SetRAX->setFlag(MachineInstr::FrameSetup);
+
     if (isEAXAlive) {
       // Restore EAX
       MachineInstr *MI = addRegOffset(BuildMI(MF, DL, TII.get(X86::MOV32rm),
