@@ -353,8 +353,18 @@ bool ModuleLinker::shouldLinkFromSource(bool &LinkFromSrc,
 bool ModuleLinker::linkIfNeeded(GlobalValue &GV) {
   GlobalValue *DGV = getLinkedToGlobal(&GV);
 
-  if (shouldLinkOnlyNeeded() && !(DGV && DGV->isDeclaration()))
-    return false;
+  if (shouldLinkOnlyNeeded()) {
+    // Always import variables with appending linkage.
+    if (!GV.hasAppendingLinkage()) {
+      // Don't import globals unless they are referenced by the destination
+      // module.
+      if (!DGV)
+        return false;
+      // Don't import globals that are already defined in the destination module
+      if (!DGV->isDeclaration())
+        return false;
+    }
+  }
 
   if (DGV && !GV.hasLocalLinkage() && !GV.hasAppendingLinkage()) {
     auto *DGVar = dyn_cast<GlobalVariable>(DGV);
@@ -573,7 +583,9 @@ bool ModuleLinker::run() {
 
   if (shouldInternalizeLinkedSymbols()) {
     for (GlobalValue *GV : ValuesToLink)
-      Internalize.insert(GV->getName());
+        if (!GV->hasAppendingLinkage()) {
+            Internalize.insert(GV->getName());
+        }
   }
 
   // FIXME: Propagate Errors through to the caller instead of emitting
