@@ -18,6 +18,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Linker/Linker.h"
 #include "llvm/Support/SourceMgr.h"
+#include "llvm/Transforms/IPO/Internalize.h"
 #include "gtest/gtest.h"
 
 using namespace llvm;
@@ -358,6 +359,673 @@ TEST_F(LinkModuleTest, RemangleIntrinsics) {
   // intrinsic definition.
   Function *F = Foo->getFunction("llvm.memset.p0s_struct.rtx_defs.i32");
   ASSERT_EQ(F->getNumUses(), (unsigned)2);
+}
+
+TEST_F(LinkModuleTest, ImportIntrinsicGlobalVariables_ctors1) {
+  SMDiagnostic Err;
+
+  // Only the source module has global constructors and these are imported!
+  const char *SrcStr =
+      ("define internal void @ctor1() {\n"
+       "  call void @func1()\n"
+       "  ret void\n"
+       "}"
+       "define internal void @ctor2() {\n"
+       "  ret void\n"
+       "}\n"
+       "define void @func1() {\n"
+       "  ret void\n"
+       "}\n"
+       "@llvm.global_ctors = appending global[2 x{i32, void() *, i8 * }]\n"
+       "  [{i32, void() *, i8 * } { i32 2, void() *@ctor1, i8 *null},\n"
+       "   {i32, void() *, i8 * } { i32 7, void() *@ctor2, i8 *null}]\n");
+
+  std::unique_ptr<Module> Src = parseAssemblyString(SrcStr, Err, Ctx);
+  ASSERT_TRUE(bool(Src));
+  ASSERT_TRUE(Src.get());
+
+  // Link into destination module.
+  auto Dst = llvm::make_unique<Module>("Linked", Ctx);
+  ASSERT_TRUE(Dst.get());
+  Ctx.setDiagnosticHandler(expectNoDiags);
+  Linker L(*Dst);
+
+  ASSERT_FALSE(
+      L.linkInModule(std::move(Src), Linker::LinkOnlyNeeded,
+                     [](Module &M, const StringSet<> &GVS) {
+                       internalizeModule(M, [&GVS](const GlobalValue &GV) {
+                         return !GV.hasName() || (GVS.count(GV.getName()) == 0);
+                       });
+                     }));
+
+  // Intrisic global variables must be imported since the
+  // ImportIntrinsicGlobalVariables flag has been specified.
+  auto const *ctor1 = Dst->getFunction("ctor1");
+  auto const *ctor2 = Dst->getFunction("ctor2");
+  auto const *func1 = Dst->getFunction("func1");
+  auto const *gctors = Dst->getNamedGlobal("llvm.global_ctors");
+
+  ASSERT_NE(nullptr, ctor1);
+  ASSERT_NE(nullptr, ctor2);
+  ASSERT_NE(nullptr, func1);
+  ASSERT_NE(nullptr, gctors);
+
+  EXPECT_TRUE(ctor1->hasInternalLinkage());
+  EXPECT_TRUE(ctor2->hasInternalLinkage());
+  EXPECT_TRUE(func1->hasInternalLinkage());
+  EXPECT_TRUE(gctors->hasAppendingLinkage());
+
+  auto const *init = dyn_cast_or_null<ConstantArray>(gctors->getInitializer());
+  ASSERT_NE(nullptr, init);
+  ASSERT_EQ(2U, init->getNumOperands());
+
+  auto const *ctor1_init =
+      dyn_cast_or_null<ConstantStruct>(init->getOperand(0U));
+  auto const *ctor2_init =
+      dyn_cast_or_null<ConstantStruct>(init->getOperand(1U));
+  ASSERT_NE(nullptr, ctor1_init);
+  ASSERT_NE(nullptr, ctor2_init);
+
+  EXPECT_EQ(3U, ctor1_init->getNumOperands());
+  EXPECT_EQ(2U,
+            dyn_cast<ConstantInt>(ctor1_init->getOperand(0U))
+                ->getZExtValue());
+  EXPECT_EQ(ctor1, dyn_cast<Function>(ctor1_init->getOperand(1U)));
+  EXPECT_TRUE(isa<ConstantPointerNull>(ctor1_init->getOperand(2U)));
+
+  EXPECT_EQ(3U, ctor2_init->getNumOperands());
+  EXPECT_EQ(7U,
+            dyn_cast<ConstantInt>(ctor2_init->getOperand(0U))
+                ->getZExtValue());
+  EXPECT_EQ(ctor2, dyn_cast<Function>(ctor2_init->getOperand(1U)));
+  EXPECT_TRUE(isa<ConstantPointerNull>(ctor2_init->getOperand(2U)));
+}
+
+TEST_F(LinkModuleTest, ImportIntrinsicGlobalVariables_ctors2) {
+  SMDiagnostic Err;
+
+  // Both the destination and the source modules have global constructors.
+  const char *DstStr =
+      ("define void @foo() {\n"
+       "  ret void\n"
+       "}"
+       "define internal void @ctor1() {\n"
+       "  ret void\n"
+       "}"
+       "@llvm.global_ctors = appending global[1 x{i32, void() *, i8 * }]\n"
+       "  [{i32, void() *, i8 * } { i32 4, void() *@ctor1, i8 *null}]\n");
+
+  const char *SrcStr =
+      ("define internal void @ctor1() {\n"
+       "  call void @func1()\n"
+       "  ret void\n"
+       "}"
+       "define internal void @ctor2() {\n"
+       "  ret void\n"
+       "}\n"
+       "define void @func1() {\n"
+       "  ret void\n"
+       "}\n"
+       "@llvm.global_ctors = appending global[2 x{i32, void() *, i8 * }]\n"
+       "  [{i32, void() *, i8 * } { i32 2, void() *@ctor1, i8 *null},\n"
+       "   {i32, void() *, i8 * } { i32 7, void() *@ctor2, i8 *null}]\n");
+
+  std::unique_ptr<Module> Src = parseAssemblyString(SrcStr, Err, Ctx);
+  ASSERT_TRUE(bool(Src));
+  ASSERT_TRUE(Src.get());
+
+  // Link into destination module.
+   std::unique_ptr<Module> Dst = parseAssemblyString(DstStr, Err, Ctx);
+  ASSERT_TRUE(Dst.get());
+  Ctx.setDiagnosticHandler(expectNoDiags);
+  Linker L(*Dst);
+
+  ASSERT_FALSE(
+      L.linkInModule(std::move(Src), Linker::LinkOnlyNeeded,
+                     [](Module &M, const StringSet<> &GVS) {
+                       internalizeModule(M, [&GVS](const GlobalValue &GV) {
+                         return !GV.hasName() || (GVS.count(GV.getName()) == 0);
+                       });
+                     }));
+
+  // Intrisic global variables must be imported since the
+  // ImportIntrinsicGlobalVariables flag has been specified.
+  auto const *ctor1 = Dst->getFunction("ctor1");
+  auto const *ctor1_2 = Dst->getFunction("ctor1.2");
+  auto const *ctor2 = Dst->getFunction("ctor2");
+  auto const *func1 = Dst->getFunction("func1");
+  auto const *foo = Dst->getFunction("foo");
+  auto const *gctors = Dst->getNamedGlobal("llvm.global_ctors");
+
+  ASSERT_NE(nullptr, ctor1);
+  ASSERT_NE(nullptr, ctor1_2);
+  ASSERT_NE(nullptr, ctor2);
+  ASSERT_NE(nullptr, func1);
+  ASSERT_NE(nullptr, foo);
+  ASSERT_NE(nullptr, gctors);
+
+  EXPECT_TRUE(ctor1->hasInternalLinkage());
+  EXPECT_TRUE(ctor1_2->hasInternalLinkage());
+  EXPECT_TRUE(ctor2->hasInternalLinkage());
+  EXPECT_TRUE(func1->hasInternalLinkage());
+  EXPECT_TRUE(foo->hasExternalLinkage());
+  EXPECT_TRUE(gctors->hasAppendingLinkage());
+
+  auto const *init = dyn_cast_or_null<ConstantArray>(gctors->getInitializer());
+  ASSERT_NE(nullptr, init);
+  ASSERT_EQ(3U, init->getNumOperands());
+
+  auto const *ctor1_init =
+      dyn_cast_or_null<ConstantStruct>(init->getOperand(0U));
+  auto const *ctor1_2_init =
+      dyn_cast_or_null<ConstantStruct>(init->getOperand(1U));
+  auto const *ctor2_init =
+      dyn_cast_or_null<ConstantStruct>(init->getOperand(2U));
+  ASSERT_NE(nullptr, ctor1_init);
+  ASSERT_NE(nullptr, ctor1_2_init);
+  ASSERT_NE(nullptr, ctor2_init);
+
+  EXPECT_EQ(3U, ctor1_init->getNumOperands());
+  EXPECT_EQ(4U,
+            dyn_cast<ConstantInt>(ctor1_init->getOperand(0U))
+                ->getZExtValue());
+  EXPECT_EQ(ctor1, dyn_cast<Function>(ctor1_init->getOperand(1U)));
+  EXPECT_TRUE(isa<ConstantPointerNull>(ctor1_init->getOperand(2U)));
+
+  EXPECT_EQ(2U,
+            dyn_cast<ConstantInt>(ctor1_2_init->getOperand(0U))
+                ->getZExtValue());
+  EXPECT_EQ(ctor1_2, dyn_cast<Function>(ctor1_2_init->getOperand(1U)));
+  EXPECT_TRUE(isa<ConstantPointerNull>(ctor1_2_init->getOperand(2U)));
+
+  EXPECT_EQ(3U, ctor2_init->getNumOperands());
+  EXPECT_EQ(7U,
+            dyn_cast<ConstantInt>(ctor2_init->getOperand(0U))
+                ->getZExtValue());
+  EXPECT_EQ(ctor2, dyn_cast<Function>(ctor2_init->getOperand(1U)));
+  EXPECT_TRUE(isa<ConstantPointerNull>(ctor2_init->getOperand(2U)));
+}
+
+TEST_F(LinkModuleTest, ImportIntrinsicGlobalVariables_ctors3) {
+  SMDiagnostic Err;
+
+  // Destination and source modules have global constructors.
+  const char *DstStr =
+      ("define void @foo() {\n"
+       "  ret void\n"
+       "}"
+       "define internal void @ctor1() {\n"
+       "  ret void\n"
+       "}"
+       "@llvm.global_ctors = appending global[1 x{i32, void() *, i8 * }]\n"
+       "  [{i32, void() *, i8 * } { i32 4, void() *@ctor1, i8 *null}]\n");
+
+  const char *Src1Str =
+      ("define internal void @ctor1() {\n"
+       "  call void @func1()\n"
+       "  ret void\n"
+       "}"
+       "define internal void @ctor2() {\n"
+       "  ret void\n"
+       "}\n"
+       "define void @func1() {\n"
+       "  ret void\n"
+       "}\n"
+       "@llvm.global_ctors = appending global[2 x{i32, void() *, i8 * }]\n"
+       "  [{i32, void() *, i8 * } { i32 2, void() *@ctor1, i8 *null},\n"
+       "   {i32, void() *, i8 * } { i32 7, void() *@ctor2, i8 *null}]\n");
+
+  const char *Src2Str =
+      ("define internal void @ctor3() {\n"
+       "  call void @func1()\n"
+       "  ret void\n"
+       "}"
+       "define internal void @ctor4() {\n"
+       "  ret void\n"
+       "}\n"
+       "define void @func1() {\n"
+       "  ret void\n"
+       "}\n"
+       "@llvm.global_ctors = appending global[2 x{i32, void() *, i8 * }]\n"
+       "  [{i32, void() *, i8 * } { i32 1, void() *@ctor3, i8 *null},\n"
+       "   {i32, void() *, i8 * } { i32 9, void() *@ctor4, i8 *null}]\n");
+
+  std::unique_ptr<Module> Src1 = parseAssemblyString(Src1Str, Err, Ctx);
+  ASSERT_TRUE(bool(Src1));
+  ASSERT_TRUE(Src1.get());
+
+  std::unique_ptr<Module> Src2 = parseAssemblyString(Src2Str, Err, Ctx);
+  ASSERT_TRUE(bool(Src2));
+  ASSERT_TRUE(Src2.get());
+
+  // Link into destination module.
+  std::unique_ptr<Module> Dst = parseAssemblyString(DstStr, Err, Ctx);
+  ASSERT_TRUE(Dst.get());
+  Ctx.setDiagnosticHandler(expectNoDiags);
+  Linker L(*Dst);
+
+  ASSERT_FALSE(
+      L.linkInModule(std::move(Src1), Linker::LinkOnlyNeeded,
+                     [](Module &M, const StringSet<> &GVS) {
+                       internalizeModule(M, [&GVS](const GlobalValue &GV) {
+                         return !GV.hasName() || (GVS.count(GV.getName()) == 0);
+                       });
+                     }));
+
+  ASSERT_FALSE(
+      L.linkInModule(std::move(Src2), Linker::LinkOnlyNeeded,
+                     [](Module &M, const StringSet<> &GVS) {
+                       internalizeModule(M, [&GVS](const GlobalValue &GV) {
+                         return !GV.hasName() || (GVS.count(GV.getName()) == 0);
+                       });
+                     }));
+
+  // Intrisic global variables must be imported since the
+  // ImportIntrinsicGlobalVariables flag has been specified.
+  auto const *ctor1 = Dst->getFunction("ctor1");
+  auto const *ctor1_2 = Dst->getFunction("ctor1.2");
+  auto const *ctor2 = Dst->getFunction("ctor2");
+  auto const *ctor3 = Dst->getFunction("ctor3");
+  auto const *ctor4 = Dst->getFunction("ctor4");
+  auto const *func1 = Dst->getFunction("func1");
+  auto const *func1_2 = Dst->getFunction("func1.5");
+  auto const *foo = Dst->getFunction("foo");
+  auto const *gctors = Dst->getNamedGlobal("llvm.global_ctors");
+
+  ASSERT_NE(nullptr, ctor1);
+  ASSERT_NE(nullptr, ctor1_2);
+  ASSERT_NE(nullptr, ctor2);
+  ASSERT_NE(nullptr, ctor3);
+  ASSERT_NE(nullptr, ctor4);
+  ASSERT_NE(nullptr, func1);
+  ASSERT_NE(nullptr, func1_2);
+  ASSERT_NE(nullptr, foo);
+  ASSERT_NE(nullptr, gctors);
+
+  EXPECT_TRUE(ctor1->hasInternalLinkage());
+  EXPECT_TRUE(ctor1_2->hasInternalLinkage());
+  EXPECT_TRUE(ctor2->hasInternalLinkage());
+  EXPECT_TRUE(ctor3->hasInternalLinkage());
+  EXPECT_TRUE(ctor4->hasInternalLinkage());
+  EXPECT_TRUE(func1->hasInternalLinkage());
+  EXPECT_TRUE(func1_2->hasInternalLinkage());
+  EXPECT_TRUE(foo->hasExternalLinkage());
+  EXPECT_TRUE(gctors->hasAppendingLinkage());
+
+  auto const *init = dyn_cast_or_null<ConstantArray>(gctors->getInitializer());
+  ASSERT_NE(nullptr, init);
+  ASSERT_EQ(5U, init->getNumOperands());
+
+  auto const *ctor1_init =
+      dyn_cast_or_null<ConstantStruct>(init->getOperand(0U));
+  auto const *ctor1_2_init =
+      dyn_cast_or_null<ConstantStruct>(init->getOperand(1U));
+  auto const *ctor2_init =
+      dyn_cast_or_null<ConstantStruct>(init->getOperand(2U));
+  auto const *ctor3_init =
+      dyn_cast_or_null<ConstantStruct>(init->getOperand(3U));
+  auto const *ctor4_init =
+      dyn_cast_or_null<ConstantStruct>(init->getOperand(4U));
+  ASSERT_NE(nullptr, ctor1_init);
+  ASSERT_NE(nullptr, ctor1_2_init);
+  ASSERT_NE(nullptr, ctor2_init);
+  ASSERT_NE(nullptr, ctor3_init);
+  ASSERT_NE(nullptr, ctor4_init);
+
+  EXPECT_EQ(3U, ctor1_init->getNumOperands());
+  EXPECT_EQ(4U,
+            dyn_cast<ConstantInt>(ctor1_init->getOperand(0U))
+                ->getZExtValue());
+  EXPECT_EQ(ctor1, dyn_cast<Function>(ctor1_init->getOperand(1U)));
+  EXPECT_TRUE(isa<ConstantPointerNull>(ctor1_init->getOperand(2U)));
+
+  EXPECT_EQ(2U,
+            dyn_cast<ConstantInt>(ctor1_2_init->getOperand(0U))
+                ->getZExtValue());
+  EXPECT_EQ(ctor1_2, dyn_cast<Function>(ctor1_2_init->getOperand(1U)));
+  EXPECT_TRUE(isa<ConstantPointerNull>(ctor1_2_init->getOperand(2U)));
+
+  EXPECT_EQ(3U, ctor2_init->getNumOperands());
+  EXPECT_EQ(7U,
+            dyn_cast<ConstantInt>(ctor2_init->getOperand(0U))
+                ->getZExtValue());
+  EXPECT_EQ(ctor2, dyn_cast<Function>(ctor2_init->getOperand(1U)));
+  EXPECT_TRUE(isa<ConstantPointerNull>(ctor2_init->getOperand(2U)));
+
+  EXPECT_EQ(3U, ctor3_init->getNumOperands());
+  EXPECT_EQ(1U,
+            dyn_cast<ConstantInt>(ctor3_init->getOperand(0U))
+                ->getZExtValue());
+  EXPECT_EQ(ctor3, dyn_cast<Function>(ctor3_init->getOperand(1U)));
+  EXPECT_TRUE(isa<ConstantPointerNull>(ctor3_init->getOperand(2U)));
+
+  EXPECT_EQ(3U, ctor4_init->getNumOperands());
+  EXPECT_EQ(9U,
+            dyn_cast<ConstantInt>(ctor4_init->getOperand(0U))
+                ->getZExtValue());
+  EXPECT_EQ(ctor4, dyn_cast<Function>(ctor4_init->getOperand(1U)));
+  EXPECT_TRUE(isa<ConstantPointerNull>(ctor4_init->getOperand(2U)));
+}
+
+TEST_F(LinkModuleTest, ImportIntrinsicGlobalVariables_ctors4) {
+  SMDiagnostic Err;
+
+  // Source modules have global constructors, but destination doesn't
+  const char *Src1Str =
+      ("define internal void @ctor1() {\n"
+       "  call void @func1()\n"
+       "  ret void\n"
+       "}"
+       "define internal void @ctor2() {\n"
+       "  ret void\n"
+       "}\n"
+       "define void @func1() {\n"
+       "  ret void\n"
+       "}\n"
+       "@llvm.global_ctors = appending global[2 x{i32, void() *, i8 * }]\n"
+       "  [{i32, void() *, i8 * } { i32 2, void() *@ctor1, i8 *null},\n"
+       "   {i32, void() *, i8 * } { i32 7, void() *@ctor2, i8 *null}]\n");
+
+  const char *Src2Str =
+      ("define internal void @ctor3() {\n"
+       "  call void @func1()\n"
+       "  ret void\n"
+       "}"
+       "define internal void @ctor4() {\n"
+       "  ret void\n"
+       "}\n"
+       "define void @func1() {\n"
+       "  ret void\n"
+       "}\n"
+       "@llvm.global_ctors = appending global[2 x{i32, void() *, i8 * }]\n"
+       "  [{i32, void() *, i8 * } { i32 1, void() *@ctor3, i8 *null},\n"
+       "   {i32, void() *, i8 * } { i32 9, void() *@ctor4, i8 *null}]\n");
+
+  std::unique_ptr<Module> Src1 = parseAssemblyString(Src1Str, Err, Ctx);
+  ASSERT_TRUE(bool(Src1));
+  ASSERT_TRUE(Src1.get());
+
+  std::unique_ptr<Module> Src2 = parseAssemblyString(Src2Str, Err, Ctx);
+  ASSERT_TRUE(bool(Src2));
+  ASSERT_TRUE(Src2.get());
+
+  // Link into destination module.
+  auto Dst = llvm::make_unique<Module>("Linked", Ctx);
+  ASSERT_TRUE(Dst.get());
+  Ctx.setDiagnosticHandler(expectNoDiags);
+  Linker L(*Dst);
+
+  ASSERT_FALSE(
+      L.linkInModule(std::move(Src1), Linker::LinkOnlyNeeded,
+                     [](Module &M, const StringSet<> &GVS) {
+                       internalizeModule(M, [&GVS](const GlobalValue &GV) {
+                         return !GV.hasName() || (GVS.count(GV.getName()) == 0);
+                       });
+                     }));
+
+  ASSERT_FALSE(
+      L.linkInModule(std::move(Src2), Linker::LinkOnlyNeeded,
+                     [](Module &M, const StringSet<> &GVS) {
+                       internalizeModule(M, [&GVS](const GlobalValue &GV) {
+                         return !GV.hasName() || (GVS.count(GV.getName()) == 0);
+                       });
+                     }));
+
+  // Intrisic global variables must be imported since the
+  // ImportIntrinsicGlobalVariables flag has been specified.
+  auto const *ctor1 = Dst->getFunction("ctor1");
+  auto const *ctor2 = Dst->getFunction("ctor2");
+  auto const *ctor3 = Dst->getFunction("ctor3");
+  auto const *ctor4 = Dst->getFunction("ctor4");
+  auto const *func1 = Dst->getFunction("func1");
+  auto const *func1_2 = Dst->getFunction("func1.3");
+  auto const *gctors = Dst->getNamedGlobal("llvm.global_ctors");
+
+  ASSERT_NE(nullptr, ctor1);
+  ASSERT_NE(nullptr, ctor2);
+  ASSERT_NE(nullptr, ctor3);
+  ASSERT_NE(nullptr, ctor4);
+  ASSERT_NE(nullptr, func1);
+  ASSERT_NE(nullptr, func1_2);
+  ASSERT_NE(nullptr, gctors);
+
+  EXPECT_TRUE(ctor1->hasInternalLinkage());
+  EXPECT_TRUE(ctor2->hasInternalLinkage());
+  EXPECT_TRUE(ctor3->hasInternalLinkage());
+  EXPECT_TRUE(ctor4->hasInternalLinkage());
+  EXPECT_TRUE(func1->hasInternalLinkage());
+  EXPECT_TRUE(func1_2->hasInternalLinkage());
+  EXPECT_TRUE(gctors->hasAppendingLinkage());
+
+  auto const *init = dyn_cast_or_null<ConstantArray>(gctors->getInitializer());
+  ASSERT_NE(nullptr, init);
+  ASSERT_EQ(4U, init->getNumOperands());
+
+  auto const *ctor1_init =
+      dyn_cast_or_null<ConstantStruct>(init->getOperand(0U));
+  auto const *ctor2_init =
+      dyn_cast_or_null<ConstantStruct>(init->getOperand(1U));
+  auto const *ctor3_init =
+      dyn_cast_or_null<ConstantStruct>(init->getOperand(2U));
+  auto const *ctor4_init =
+      dyn_cast_or_null<ConstantStruct>(init->getOperand(3U));
+  ASSERT_NE(nullptr, ctor1_init);
+  ASSERT_NE(nullptr, ctor2_init);
+  ASSERT_NE(nullptr, ctor3_init);
+  ASSERT_NE(nullptr, ctor4_init);
+
+  EXPECT_EQ(3U, ctor1_init->getNumOperands());
+  EXPECT_EQ(2U,
+            dyn_cast<ConstantInt>(ctor1_init->getOperand(0U))
+                ->getZExtValue());
+  EXPECT_EQ(ctor1, dyn_cast<Function>(ctor1_init->getOperand(1U)));
+  EXPECT_TRUE(isa<ConstantPointerNull>(ctor1_init->getOperand(2U)));
+
+  EXPECT_EQ(3U, ctor2_init->getNumOperands());
+  EXPECT_EQ(7U,
+            dyn_cast<ConstantInt>(ctor2_init->getOperand(0U))
+                ->getZExtValue());
+  EXPECT_EQ(ctor2, dyn_cast<Function>(ctor2_init->getOperand(1U)));
+  EXPECT_TRUE(isa<ConstantPointerNull>(ctor2_init->getOperand(2U)));
+
+  EXPECT_EQ(3U, ctor3_init->getNumOperands());
+  EXPECT_EQ(1U,
+            dyn_cast<ConstantInt>(ctor3_init->getOperand(0U))
+                ->getZExtValue());
+  EXPECT_EQ(ctor3, dyn_cast<Function>(ctor3_init->getOperand(1U)));
+  EXPECT_TRUE(isa<ConstantPointerNull>(ctor3_init->getOperand(2U)));
+
+  EXPECT_EQ(3U, ctor4_init->getNumOperands());
+  EXPECT_EQ(9U,
+            dyn_cast<ConstantInt>(ctor4_init->getOperand(0U))
+                ->getZExtValue());
+  EXPECT_EQ(ctor4, dyn_cast<Function>(ctor4_init->getOperand(1U)));
+  EXPECT_TRUE(isa<ConstantPointerNull>(ctor4_init->getOperand(2U)));
+}
+
+TEST_F(LinkModuleTest, ImportIntrinsicGlobalVariables_dtors1) {
+  SMDiagnostic Err;
+
+  // Only the source module has global destructors and these are imported!
+  const char *SrcStr =
+      ("define internal void @dtor1() {\n"
+       "  ret void\n"
+       "}"
+       "define internal void @dtor2() {\n"
+       "  ret void\n"
+       "}\n"
+       "@llvm.global_dtors = appending global[2 x{i32, void() *, i8 * }]\n"
+       "  [{i32, void() *, i8 * } { i32 2, void() *@dtor1, i8 *null},\n"
+       "   {i32, void() *, i8 * } { i32 7, void() *@dtor2, i8 *null}]\n");
+
+  std::unique_ptr<Module> Src = parseAssemblyString(SrcStr, Err, Ctx);
+  ASSERT_TRUE(bool(Src));
+  ASSERT_TRUE(Src.get());
+
+  // Link into destination module.
+  auto Dst = llvm::make_unique<Module>("Linked", Ctx);
+  ASSERT_TRUE(Dst.get());
+  Ctx.setDiagnosticHandler(expectNoDiags);
+  Linker L(*Dst);
+
+  ASSERT_FALSE(L.linkInModule(
+      std::move(Src), Linker::LinkOnlyNeeded,
+      [](Module &M, const StringSet<> &GVS) {
+          internalizeModule(M, [&GVS](const GlobalValue &GV) {
+              return !GV.hasName() || (GVS.count(GV.getName()) == 0);
+          });
+      }));
+
+  // Intrisic global variables must be imported since the
+  // ImportIntrinsicGlobalVariables flag has been specified.
+  auto const *dtor1 = Dst->getFunction("dtor1");
+  auto const *dtor2 = Dst->getFunction("dtor2");
+  auto const *gdtors = Dst->getNamedGlobal("llvm.global_dtors");
+
+  ASSERT_NE(nullptr, dtor1);
+  ASSERT_NE(nullptr, dtor2);
+  ASSERT_NE(nullptr, gdtors);
+
+  EXPECT_TRUE(dtor1->hasInternalLinkage());
+  EXPECT_TRUE(dtor2->hasInternalLinkage());
+  EXPECT_TRUE(gdtors->hasAppendingLinkage());
+
+  auto const *init = dyn_cast_or_null<ConstantArray>(gdtors->getInitializer());
+  ASSERT_NE(nullptr, init);
+  ASSERT_EQ(2U, init->getNumOperands());
+
+  auto const *dtor1_init =
+      dyn_cast_or_null<ConstantStruct>(init->getOperand(0U));
+  auto const *dtor2_init =
+      dyn_cast_or_null<ConstantStruct>(init->getOperand(1U));
+  ASSERT_NE(nullptr, dtor1_init);
+  ASSERT_NE(nullptr, dtor2_init);
+
+  EXPECT_EQ(3U, dtor1_init->getNumOperands());
+  EXPECT_EQ(2U,
+            dyn_cast<ConstantInt>(dtor1_init->getOperand(0U))
+                ->getZExtValue());
+  EXPECT_EQ(dtor1, dyn_cast<Function>(dtor1_init->getOperand(1U)));
+  EXPECT_TRUE(isa<ConstantPointerNull>(dtor1_init->getOperand(2U)));
+
+  EXPECT_EQ(3U, dtor2_init->getNumOperands());
+  EXPECT_EQ(7U,
+            dyn_cast<ConstantInt>(dtor2_init->getOperand(0U))
+                ->getZExtValue());
+  EXPECT_EQ(dtor2, dyn_cast<Function>(dtor2_init->getOperand(1U)));
+  EXPECT_TRUE(isa<ConstantPointerNull>(dtor2_init->getOperand(2U)));
+}
+
+TEST_F(LinkModuleTest, ImportIntrinsicGlobalVariables_used1) {
+  SMDiagnostic Err;
+
+  // Only the source module has llvm.used and these are imported!
+  const char *SrcStr =
+      ("@used1 = global i8 4\n"
+       "@used2 = global i32 123\n"
+       "@llvm.used = appending global [2 x i8*] [\n"
+       "   i8* @used1,\n"
+       "   i8* bitcast (i32* @used2 to i8*)\n"
+       "], section \"llvm.metadata\"\n");
+
+  std::unique_ptr<Module> Src = parseAssemblyString(SrcStr, Err, Ctx);
+  ASSERT_TRUE(bool(Src));
+  ASSERT_TRUE(Src.get());
+
+  // Link into destination module.
+  auto Dst = llvm::make_unique<Module>("Linked", Ctx);
+  ASSERT_TRUE(Dst.get());
+  Ctx.setDiagnosticHandler(expectNoDiags);
+  Linker L(*Dst);
+
+  ASSERT_FALSE(
+      L.linkInModule(std::move(Src), Linker::LinkOnlyNeeded,
+                     [](Module &M, const StringSet<> &GVS) {
+                       internalizeModule(M, [&GVS](const GlobalValue &GV) {
+                         return !GV.hasName() || (GVS.count(GV.getName()) == 0);
+                       });
+                     }));
+
+  // Intrisic global variables must be imported since the
+  // ImportIntrinsicGlobalVariables flag has been specified.
+  auto const *used1 = Dst->getNamedGlobal("used1");
+  auto const *used2 = Dst->getNamedGlobal("used2");
+  auto const *useds = Dst->getNamedGlobal("llvm.used");
+
+  ASSERT_NE(nullptr, used1);
+  ASSERT_NE(nullptr, used2);
+  ASSERT_NE(nullptr, useds);
+
+  EXPECT_TRUE(used1->hasExternalLinkage());
+  EXPECT_TRUE(used2->hasExternalLinkage());
+  EXPECT_TRUE(useds->hasAppendingLinkage());
+
+  auto const *init = dyn_cast_or_null<ConstantArray>(useds->getInitializer());
+  ASSERT_NE(nullptr, init);
+  ASSERT_EQ(2U, init->getNumOperands());
+
+  auto const *used1_init =
+      dyn_cast_or_null<GlobalVariable>(init->getOperand(0U));
+  auto const *used2_init =
+      dyn_cast_or_null<ConstantExpr>(init->getOperand(1U));
+  EXPECT_EQ(used1, used1_init);
+  EXPECT_EQ(used2, used2_init->getOperand(0U));
+}
+
+TEST_F(LinkModuleTest, ImportIntrinsicGlobalVariables_compiler_used1) {
+  SMDiagnostic Err;
+
+  // Only the source module has llvm.compiler.used and these are imported!
+  const char *SrcStr =
+      ("@used1 = global i8 4\n"
+       "@used2 = global i32 123\n"
+       "@llvm.compiler.used = appending global [2 x i8*] [\n"
+       "   i8* @used1,\n"
+       "   i8* bitcast (i32* @used2 to i8*)\n"
+       "], section \"llvm.metadata\"\n");
+
+  std::unique_ptr<Module> Src = parseAssemblyString(SrcStr, Err, Ctx);
+  ASSERT_TRUE(bool(Src));
+  ASSERT_TRUE(Src.get());
+
+  // Link into destination module.
+  auto Dst = llvm::make_unique<Module>("Linked", Ctx);
+  ASSERT_TRUE(Dst.get());
+  Ctx.setDiagnosticHandler(expectNoDiags);
+  Linker L(*Dst);
+
+  ASSERT_FALSE(
+      L.linkInModule(std::move(Src), Linker::LinkOnlyNeeded,
+                     [](Module &M, const StringSet<> &GVS) {
+                       internalizeModule(M, [&GVS](const GlobalValue &GV) {
+                         return !GV.hasName() || (GVS.count(GV.getName()) == 0);
+                       });
+                     }));
+
+  // Intrisic global variables must be imported since the
+  // ImportIntrinsicGlobalVariables flag has been specified.
+  auto const *used1 = Dst->getNamedGlobal("used1");
+  auto const *used2 = Dst->getNamedGlobal("used2");
+  auto const *useds = Dst->getNamedGlobal("llvm.compiler.used");
+
+  ASSERT_NE(nullptr, used1);
+  ASSERT_NE(nullptr, used2);
+  ASSERT_NE(nullptr, useds);
+
+  EXPECT_TRUE(used1->hasInternalLinkage());
+  EXPECT_TRUE(used2->hasInternalLinkage());
+  EXPECT_TRUE(useds->hasAppendingLinkage());
+
+  auto const *init = dyn_cast_or_null<ConstantArray>(useds->getInitializer());
+  ASSERT_NE(nullptr, init);
+  ASSERT_EQ(2U, init->getNumOperands());
+
+  auto const *used1_init =
+      dyn_cast_or_null<GlobalVariable>(init->getOperand(0U));
+  auto const *used2_init =
+      dyn_cast_or_null<ConstantExpr>(init->getOperand(1U));
+  EXPECT_EQ(used1, used1_init);
+  EXPECT_EQ(used2, used2_init->getOperand(0U));
 }
 
 } // end anonymous namespace
