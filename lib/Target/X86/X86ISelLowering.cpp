@@ -17626,23 +17626,21 @@ SDValue X86TargetLowering::LowerSELECT(SDValue Op, SelectionDAG &DAG) const {
     if ((isAllOnesConstant(Op1) || isAllOnesConstant(Op2)) &&
         (CondCode == X86::COND_E || CondCode == X86::COND_NE)) {
       SDValue Y = isAllOnesConstant(Op2) ? Op1 : Op2;
-
       SDValue CmpOp0 = Cmp.getOperand(0);
+
       // Apply further optimizations for special cases
       // (select (x != 0), -1, 0) -> neg & sbb
       // (select (x == 0), 0, -1) -> neg & sbb
       if (isNullConstant(Y) &&
-            (isAllOnesConstant(Op1) == (CondCode == X86::COND_NE))) {
-          SDVTList VTs = DAG.getVTList(CmpOp0.getValueType(), MVT::i32);
-          SDValue Neg = DAG.getNode(X86ISD::SUB, DL, VTs,
-                                    DAG.getConstant(0, DL,
-                                                    CmpOp0.getValueType()),
-                                    CmpOp0);
-          SDValue Res = DAG.getNode(X86ISD::SETCC_CARRY, DL, Op.getValueType(),
-                                    DAG.getConstant(X86::COND_B, DL, MVT::i8),
-                                    SDValue(Neg.getNode(), 1));
-          return Res;
-        }
+          (isAllOnesConstant(Op1) == (CondCode == X86::COND_NE))) {
+        SDVTList VTs = DAG.getVTList(CmpOp0.getValueType(), MVT::i32);
+        SDValue Zero = DAG.getConstant(0, DL, CmpOp0.getValueType());
+        SDValue Neg = DAG.getNode(X86ISD::SUB, DL, VTs, Zero, CmpOp0);
+        SDValue Res = DAG.getNode(X86ISD::SETCC_CARRY, DL, Op.getValueType(),
+                                  DAG.getConstant(X86::COND_B, DL, MVT::i8),
+                                  SDValue(Neg.getNode(), 1));
+        return Res;
+      }
 
       Cmp = DAG.getNode(X86ISD::CMP, DL, MVT::i32,
                         CmpOp0, DAG.getConstant(1, DL, CmpOp0.getValueType()));
@@ -18653,8 +18651,9 @@ X86TargetLowering::LowerDYNAMIC_STACKALLOC(SDValue Op,
                                            SelectionDAG &DAG) const {
   MachineFunction &MF = DAG.getMachineFunction();
   bool SplitStack = MF.shouldSplitStack();
+  bool EmitStackProbe = !getStackProbeSymbolName(MF).empty();
   bool Lower = (Subtarget.isOSWindows() && !Subtarget.isTargetMachO()) ||
-               SplitStack;
+               SplitStack || EmitStackProbe;
   SDLoc dl(Op);
 
   // Get the inputs.
@@ -23710,6 +23709,57 @@ static SDValue LowerMGATHER(SDValue Op, const X86Subtarget &Subtarget,
     SDValue RetOps[] = {Exract, NewGather.getValue(1)};
     return DAG.getMergeValues(RetOps, dl);
   }
+  if (N->getMemoryVT() == MVT::v2i32 && Subtarget.hasVLX()) {
+    // There is a special case when the return type is v2i32 is illegal and 
+    // the type legaizer extended it to v2i64. Without this conversion we end up
+    // with VPGATHERQQ (reading q-words from the memory) instead of VPGATHERQD.
+    // In order to avoid this situation, we'll build an X86 specific Gather node
+    // with index v2i64 and value type v4i32.
+    assert(VT == MVT::v2i64 && Src0.getValueType() == MVT::v2i64 &&
+           "Unexpected type in masked gather");
+    Src0 = DAG.getVectorShuffle(MVT::v4i32, dl,
+                                DAG.getBitcast(MVT::v4i32, Src0),
+                                DAG.getUNDEF(MVT::v4i32), { 0, 2, -1, -1 });
+    // The mask should match the destination type. Extending mask with zeroes
+    // is not necessary since instruction itself reads only two values from
+    // memory.
+    Mask = ExtendToType(Mask, MVT::v4i1, DAG, false);
+    SDValue Ops[] = { N->getChain(), Src0, Mask, N->getBasePtr(), Index };
+    SDValue NewGather = DAG.getTargetMemSDNode<X86MaskedGatherSDNode>(
+      DAG.getVTList(MVT::v4i32, MVT::Other), Ops, dl, N->getMemoryVT(),
+      N->getMemOperand());
+
+    SDValue Sext = getExtendInVec(X86ISD::VSEXT, dl, MVT::v2i64,
+                                  NewGather.getValue(0), DAG);
+    SDValue RetOps[] = { Sext, NewGather.getValue(1) };
+    return DAG.getMergeValues(RetOps, dl);
+  }
+  if (N->getMemoryVT() == MVT::v2f32 && Subtarget.hasVLX()) {
+    // This transformation is for optimization only.
+    // The type legalizer extended mask and index to 4 elements vector
+    // in order to match requirements of the common gather node - same
+    // vector width of index and value. X86 Gather node allows mismatch
+    // of vector width in order to select more optimal instruction at the
+    // end.
+    assert(VT == MVT::v4f32 && Src0.getValueType() == MVT::v4f32 &&
+           "Unexpected type in masked gather");
+    if (Mask.getOpcode() == ISD::CONCAT_VECTORS &&
+        ISD::isBuildVectorAllZeros(Mask.getOperand(1).getNode()) &&
+        Index.getOpcode() == ISD::CONCAT_VECTORS &&
+        Index.getOperand(1).isUndef()) {
+      Mask = ExtendToType(Mask.getOperand(0), MVT::v4i1, DAG, false);
+      Index = Index.getOperand(0);
+    } else
+      return Op;
+    SDValue Ops[] = { N->getChain(), Src0, Mask, N->getBasePtr(), Index };
+    SDValue NewGather = DAG.getTargetMemSDNode<X86MaskedGatherSDNode>(
+      DAG.getVTList(MVT::v4f32, MVT::Other), Ops, dl, N->getMemoryVT(),
+      N->getMemOperand());
+
+    SDValue RetOps[] = { NewGather.getValue(0), NewGather.getValue(1) };
+    return DAG.getMergeValues(RetOps, dl);
+
+  }
   return Op;
 }
 
@@ -24513,6 +24563,7 @@ const char *X86TargetLowering::getTargetNodeName(unsigned Opcode) const {
   case X86ISD::CVTS2SI_RND:        return "X86ISD::CVTS2SI_RND";
   case X86ISD::CVTS2UI_RND:        return "X86ISD::CVTS2UI_RND";
   case X86ISD::LWPINS:             return "X86ISD::LWPINS";
+  case X86ISD::MGATHER:            return "X86ISD::MGATHER";
   }
   return nullptr;
 }
@@ -29873,7 +29924,7 @@ static SDValue combineSelectOfTwoConstants(SDNode *N, SelectionDAG &DAG) {
     if (N->getValueType(0) == MVT::i32)
       Diff = (unsigned)Diff;
 
-    bool isFastMultiplier = false;
+    bool IsFastMultiplier = false;
     if (Diff < 10) {
       switch ((unsigned char)Diff) {
       default:
@@ -29885,12 +29936,12 @@ static SDValue combineSelectOfTwoConstants(SDNode *N, SelectionDAG &DAG) {
       case 5: // result = lea base(cond, cond*4)
       case 8: // result = lea base(    , cond*8)
       case 9: // result = lea base(cond, cond*8)
-        isFastMultiplier = true;
+        IsFastMultiplier = true;
         break;
       }
     }
 
-    if (isFastMultiplier) {
+    if (IsFastMultiplier) {
       APInt Diff = TrueC->getAPIntValue() - FalseC->getAPIntValue();
       if (NeedsCondInvert) // Invert the condition if needed.
         Cond = DAG.getNode(ISD::XOR, DL, Cond.getValueType(), Cond,
@@ -34846,12 +34897,28 @@ static SDValue combineAddOrSubToADCOrSBB(SDNode *N, SelectionDAG &DAG) {
       !Cmp.getOperand(0).getValueType().isInteger())
     return SDValue();
 
-  // (cmp Z, 1) sets the carry flag if Z is 0.
   SDValue Z = Cmp.getOperand(0);
+  SDVTList VTs = DAG.getVTList(N->getValueType(0), MVT::i32);
+
+  // If X is -1 or 0, then we have an opportunity to avoid constants required by
+  // the cmp transform below. 'neg' sets the carry flag when Z != 0, so create 0
+  // or -1 using 'sbb' with fake operands:
+  //  0 - (Z != 0) --> sbb %eax, %eax, (neg Z)
+  // -1 + (Z == 0) --> sbb %eax, %eax, (neg Z)
+  if (auto *ConstantX = dyn_cast<ConstantSDNode>(X)) {
+    if ((IsSub && CC == X86::COND_NE && ConstantX->isNullValue()) ||
+        (!IsSub && CC == X86::COND_E && ConstantX->isAllOnesValue())) {
+      SDValue Zero = DAG.getConstant(0, DL, VT);
+      SDValue Neg = DAG.getNode(X86ISD::SUB, DL, VTs, Zero, Z);
+      return DAG.getNode(X86ISD::SETCC_CARRY, DL, VT,
+                         DAG.getConstant(X86::COND_B, DL, MVT::i8),
+                         SDValue(Neg.getNode(), 1));
+    }
+  }
+
+  // (cmp Z, 1) sets the carry flag if Z is 0.
   SDValue NewCmp = DAG.getNode(X86ISD::CMP, DL, MVT::i32, Z,
                                DAG.getConstant(1, DL, Z.getValueType()));
-
-  SDVTList VTs = DAG.getVTList(N->getValueType(0), MVT::i32);
 
   // X - (Z != 0) --> sub X, (zext(setne Z, 0)) --> adc X, -1, (cmp Z, 1)
   // X + (Z != 0) --> add X, (zext(setne Z, 0)) --> sbb X, -1, (cmp Z, 1)
@@ -36339,4 +36406,23 @@ void X86TargetLowering::insertCopiesSplitCSR(
 
 bool X86TargetLowering::supportSwiftError() const {
   return Subtarget.is64Bit();
+}
+
+/// Returns the name of the symbol used to emit stack probes or the empty
+/// string if not applicable.
+StringRef X86TargetLowering::getStackProbeSymbolName(MachineFunction &MF) const {
+  // If the function specifically requests stack probes, emit them.
+  if (MF.getFunction()->hasFnAttribute("probe-stack"))
+    return MF.getFunction()->getFnAttribute("probe-stack").getValueAsString();
+
+  // Generally, if we aren't on Windows, the platform ABI does not include
+  // support for stack probes, so don't emit them.
+  if (!Subtarget.isOSWindows() || Subtarget.isTargetMachO())
+    return "";
+
+  // We need a stack probe to conform to the Windows ABI. Choose the right
+  // symbol.
+  if (Subtarget.is64Bit())
+    return Subtarget.isTargetCygMing() ? "___chkstk_ms" : "__chkstk";
+  return Subtarget.isTargetCygMing() ? "_alloca" : "_chkstk";
 }
