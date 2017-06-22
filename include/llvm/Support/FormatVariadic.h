@@ -94,11 +94,7 @@ public:
     Adapters.reserve(ParamCount);
   }
 
-  formatv_object_base(formatv_object_base const &rhs)
-      : Fmt(rhs.Fmt), Adapters(), // Adapters are initialized by formatv_object
-        Replacements(rhs.Replacements) {
-    Adapters.reserve(rhs.Adapters.size());
-  };
+  formatv_object_base(formatv_object_base const &rhs) = delete;
 
   formatv_object_base(formatv_object_base &&rhs)
       : Fmt(std::move(rhs.Fmt)),
@@ -163,10 +159,7 @@ public:
     Adapters = apply_tuple(create_adapters(), Parameters);
   }
 
-  formatv_object(formatv_object const &rhs)
-      : formatv_object_base(rhs), Parameters(rhs.Parameters) {
-    Adapters = apply_tuple(create_adapters(), Parameters);
-  }
+  formatv_object(formatv_object const &rhs) = delete;
 
   formatv_object(formatv_object &&rhs)
       : formatv_object_base(std::move(rhs)),
