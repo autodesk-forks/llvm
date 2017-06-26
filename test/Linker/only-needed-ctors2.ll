@@ -1,3 +1,4 @@
+; RUN: llvm-link -S              -internalize %s %p/Inputs/only-needed-ctors.src.a.ll %p/Inputs/only-needed-ctors.src.b.ll | FileCheck %s --check-prefix=CHECK --check-prefix=INTERNALIZE
 ; RUN: llvm-link -S -only-needed              %s %p/Inputs/only-needed-ctors.src.a.ll %p/Inputs/only-needed-ctors.src.b.ll | FileCheck %s --check-prefix=CHECK --check-prefix=NO-INTERNALIZE
 ; RUN: llvm-link -S -only-needed -internalize %s %p/Inputs/only-needed-ctors.src.a.ll %p/Inputs/only-needed-ctors.src.b.ll | FileCheck %s --check-prefix=CHECK --check-prefix=INTERNALIZE
 
