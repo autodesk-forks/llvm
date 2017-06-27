@@ -1,7 +1,7 @@
-; RUN: llvm-link -S                           %s %p/Inputs/only-needed-used.src.ll | FileCheck %s
-; RUN: llvm-link -S              -internalize %s %p/Inputs/only-needed-used.src.ll | FileCheck %s
-; RUN: llvm-link -S -only-needed              %s %p/Inputs/only-needed-used.src.ll | FileCheck %s
-; RUN: llvm-link -S -only-needed -internalize %s %p/Inputs/only-needed-used.src.ll | FileCheck %s
+; RUN: llvm-link -S                           %s %p/Inputs/only-needed-used.ll | FileCheck %s
+; RUN: llvm-link -S              -internalize %s %p/Inputs/only-needed-used.ll | FileCheck %s
+; RUN: llvm-link -S -only-needed              %s %p/Inputs/only-needed-used.ll | FileCheck %s
+; RUN: llvm-link -S -only-needed -internalize %s %p/Inputs/only-needed-used.ll | FileCheck %s
 
 ; Empty destination module!
 

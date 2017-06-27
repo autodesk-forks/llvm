@@ -1,7 +1,7 @@
-; RUN: llvm-link -S                           %s %p/Inputs/only-needed-compiler-used.src.ll | FileCheck %s --check-prefix=CHECK --check-prefix=NO-INTERNALIZE
-; RUN: llvm-link -S              -internalize %s %p/Inputs/only-needed-compiler-used.src.ll | FileCheck %s --check-prefix=CHECK --check-prefix=INTERNALIZE
-; RUN: llvm-link -S -only-needed              %s %p/Inputs/only-needed-compiler-used.src.ll | FileCheck %s --check-prefix=CHECK --check-prefix=NO-INTERNALIZE
-; RUN: llvm-link -S -only-needed -internalize %s %p/Inputs/only-needed-compiler-used.src.ll | FileCheck %s --check-prefix=CHECK --check-prefix=INTERNALIZE
+; RUN: llvm-link -S                           %s %p/Inputs/only-needed-compiler-used.ll | FileCheck %s --check-prefix=CHECK --check-prefix=NO-INTERNALIZE
+; RUN: llvm-link -S              -internalize %s %p/Inputs/only-needed-compiler-used.ll | FileCheck %s --check-prefix=CHECK --check-prefix=INTERNALIZE
+; RUN: llvm-link -S -only-needed              %s %p/Inputs/only-needed-compiler-used.ll | FileCheck %s --check-prefix=CHECK --check-prefix=NO-INTERNALIZE
+; RUN: llvm-link -S -only-needed -internalize %s %p/Inputs/only-needed-compiler-used.ll | FileCheck %s --check-prefix=CHECK --check-prefix=INTERNALIZE
 
 ; Empty destination module!
 
