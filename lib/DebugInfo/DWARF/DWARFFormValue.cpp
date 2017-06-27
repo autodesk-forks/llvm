@@ -61,7 +61,7 @@ static const DWARFFormValue::FormClass DWARF4FormClasses[] = {
 
 Optional<uint8_t>
 DWARFFormValue::getFixedByteSize(dwarf::Form Form,
-                                 const DWARFFormParams &Params) {
+                                 const DWARFFormParams Params) {
   switch (Form) {
   case DW_FORM_addr:
     assert(Params.Version && Params.AddrSize && "Invalid Params for form");
@@ -146,7 +146,7 @@ DWARFFormValue::getFixedByteSize(dwarf::Form Form,
 
 bool DWARFFormValue::skipValue(dwarf::Form Form, DataExtractor DebugInfoData,
                                uint32_t *OffsetPtr,
-                               const DWARFFormParams &Params) {
+                               const DWARFFormParams Params) {
   bool Indirect = false;
   do {
     switch (Form) {
@@ -576,7 +576,6 @@ Optional<const char *> DWARFFormValue::getAsCString() const {
     uint64_t StrOffset;
     if (!U->getStringOffsetSectionItem(Offset, StrOffset))
       return None;
-    StrOffset += U->getStringOffsetSectionRelocation(Offset);
     Offset = StrOffset;
   }
   if (const char *Str = U->getStringExtractor().getCStr(&Offset)) {

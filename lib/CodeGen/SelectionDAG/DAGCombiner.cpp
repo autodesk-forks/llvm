@@ -12829,6 +12829,7 @@ bool DAGCombiner::MergeConsecutiveStores(StoreSDNode *St) {
     // This variable refers to the size and not index in the array.
     unsigned LastLegalVectorType = 1;
     unsigned LastLegalIntegerType = 1;
+    bool isDereferenceable = true;
     bool DoIntegerTruncate = false;
     StartAddress = LoadNodes[0].OffsetFromBase;
     SDValue FirstChain = FirstLoad->getChain();
@@ -12841,6 +12842,10 @@ bool DAGCombiner::MergeConsecutiveStores(StoreSDNode *St) {
       if (CurrAddress - StartAddress != (ElementSizeBytes * i))
         break;
       LastConsecutiveLoad = i;
+
+      if (isDereferenceable && !LoadNodes[i].MemNode->isDereferenceable())
+        isDereferenceable = false;
+
       // Find a legal type for the vector store.
       EVT StoreTy = EVT::getVectorVT(Context, MemVT, i + 1);
       bool IsFastSt, IsFastLd;
@@ -12926,11 +12931,16 @@ bool DAGCombiner::MergeConsecutiveStores(StoreSDNode *St) {
     SDValue NewStoreChain = getMergeStoreChains(StoreNodes, NumElem);
     AddToWorklist(NewStoreChain.getNode());
 
+    MachineMemOperand::Flags MMOFlags = isDereferenceable ? 
+                                          MachineMemOperand::MODereferenceable:
+                                          MachineMemOperand::MONone;
+
     SDValue NewLoad, NewStore;
     if (UseVectorTy || !DoIntegerTruncate) {
       NewLoad = DAG.getLoad(JointMemOpVT, LoadDL, FirstLoad->getChain(),
                             FirstLoad->getBasePtr(),
-                            FirstLoad->getPointerInfo(), FirstLoadAlign);
+                            FirstLoad->getPointerInfo(), FirstLoadAlign,
+                            MMOFlags);
       NewStore = DAG.getStore(NewStoreChain, StoreDL, NewLoad,
                               FirstInChain->getBasePtr(),
                               FirstInChain->getPointerInfo(), FirstStoreAlign);
@@ -12940,7 +12950,7 @@ bool DAGCombiner::MergeConsecutiveStores(StoreSDNode *St) {
       NewLoad =
           DAG.getExtLoad(ISD::EXTLOAD, LoadDL, ExtendedTy, FirstLoad->getChain(),
                          FirstLoad->getBasePtr(), FirstLoad->getPointerInfo(),
-                         JointMemOpVT, FirstLoadAlign);
+                         JointMemOpVT, FirstLoadAlign, MMOFlags);
       NewStore = DAG.getTruncStore(NewStoreChain, StoreDL, NewLoad,
                                    FirstInChain->getBasePtr(),
                                    FirstInChain->getPointerInfo(), JointMemOpVT,
@@ -15013,6 +15023,11 @@ static SDValue combineTruncationShuffle(ShuffleVectorSDNode *SVN,
   unsigned NumElts = VT.getVectorNumElements();
   unsigned EltSizeInBits = VT.getScalarSizeInBits();
   unsigned ExtSrcSizeInBits = N00.getScalarValueSizeInBits();
+  unsigned ExtDstSizeInBits = N0.getScalarValueSizeInBits();
+
+  if (ExtDstSizeInBits % ExtSrcSizeInBits != 0)
+    return SDValue();
+  unsigned ExtScale = ExtDstSizeInBits / ExtSrcSizeInBits;
 
   // (v4i32 truncate_vector_inreg(v2i64)) == shuffle<0,2-1,-1>
   // (v8i16 truncate_vector_inreg(v4i32)) == shuffle<0,2,4,6,-1,-1,-1,-1>
@@ -15034,11 +15049,10 @@ static SDValue combineTruncationShuffle(ShuffleVectorSDNode *SVN,
   if (EltSizeInBits != ExtSrcSizeInBits)
     return SDValue();
 
-  // Attempt to match a 'truncate_vector_inreg' shuffle, we just search for
-  // power-of-2 truncations as they are the most likely.
-  for (unsigned Scale = 2; Scale < NumElts; Scale *= 2)
-    if (isTruncate(Scale))
-      return DAG.getBitcast(VT, N00);
+  // We can remove *extend_vector_inreg only if the truncation happens at
+  // the same scale as the extension.
+  if (isTruncate(ExtScale))
+    return DAG.getBitcast(VT, N00);
 
   return SDValue();
 }
