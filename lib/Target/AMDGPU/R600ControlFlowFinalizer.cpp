@@ -230,7 +230,6 @@ private:
     CF_END
   };
 
-  static char ID;
   const R600InstrInfo *TII = nullptr;
   const R600RegisterInfo *TRI = nullptr;
   unsigned MaxFetchInst;
@@ -499,6 +498,8 @@ private:
   }
 
 public:
+  static char ID;
+
   R600ControlFlowFinalizer() : MachineFunctionPass(ID) {}
 
   bool runOnMachineFunction(MachineFunction &MF) override {
@@ -555,7 +556,7 @@ public:
             CFStack.pushBranch(AMDGPU::CF_PUSH_EG);
           } else
             CFStack.pushBranch(AMDGPU::CF_ALU_PUSH_BEFORE);
-
+          LLVM_FALLTHROUGH;
         case AMDGPU::CF_ALU:
           I = MI;
           AluClauses.push_back(MakeALUClause(MBB, I));
@@ -702,9 +703,16 @@ public:
   }
 };
 
+} // end anonymous namespace
+
+INITIALIZE_PASS_BEGIN(R600ControlFlowFinalizer, DEBUG_TYPE,
+                     "R600 Control Flow Finalizer", false, false)
+INITIALIZE_PASS_END(R600ControlFlowFinalizer, DEBUG_TYPE,
+                    "R600 Control Flow Finalizer", false, false)
+
 char R600ControlFlowFinalizer::ID = 0;
 
-} // end anonymous namespace
+char &llvm::R600ControlFlowFinalizerID = R600ControlFlowFinalizer::ID;
 
 FunctionPass *llvm::createR600ControlFlowFinalizer() {
   return new R600ControlFlowFinalizer();

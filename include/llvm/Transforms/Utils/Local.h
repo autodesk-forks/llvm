@@ -378,7 +378,20 @@ unsigned replaceDominatedUsesWith(Value *From, Value *To, DominatorTree &DT,
 ///
 /// Most passes can and should ignore this information, and it is only used
 /// during lowering by the GC infrastructure.
-bool callsGCLeafFunction(ImmutableCallSite CS);
+bool callsGCLeafFunction(ImmutableCallSite CS, const TargetLibraryInfo &TLI);
+
+/// Copy a nonnull metadata node to a new load instruction.
+///
+/// This handles mapping it to range metadata if the new load is an integer
+/// load instead of a pointer load.
+void copyNonnullMetadata(const LoadInst &OldLI, MDNode *N, LoadInst &NewLI);
+
+/// Copy a range metadata node to a new load instruction.
+///
+/// This handles mapping it to nonnull metadata if the new load is a pointer
+/// load instead of an integer load and the range doesn't cover null.
+void copyRangeMetadata(const DataLayout &DL, const LoadInst &OldLI, MDNode *N,
+                       LoadInst &NewLI);
 
 //===----------------------------------------------------------------------===//
 //  Intrinsic pattern matching

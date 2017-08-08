@@ -182,8 +182,8 @@ static Expected<CompileUnitIdentifiers> getCUIdentifiers(StringRef Abbrev,
       ID.Signature = InfoData.getU64(&Offset);
       break;
     default:
-      DWARFFormValue::skipValue(Form, InfoData, &Offset, Version, AddrSize,
-                                Format);
+      DWARFFormValue::skipValue(Form, InfoData, &Offset,
+                                DWARFFormParams({Version, AddrSize, Format}));
     }
   }
   return ID;
@@ -642,7 +642,7 @@ int main(int argc, char **argv) {
 
   MCObjectFileInfo MOFI;
   MCContext MC(MAI.get(), MRI.get(), &MOFI);
-  MOFI.InitMCObjectFileInfo(TheTriple, /*PIC*/ false, CodeModel::Default, MC);
+  MOFI.InitMCObjectFileInfo(TheTriple, /*PIC*/ false, MC);
 
   MCTargetOptions Options;
   auto MAB = TheTarget->createMCAsmBackend(*MRI, TripleName, "", Options);

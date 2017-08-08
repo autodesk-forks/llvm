@@ -79,6 +79,12 @@ def FeatureFlatScratchInsts : SubtargetFeature<"flat-scratch-insts",
   "Have scratch_* flat memory instructions"
 >;
 
+def FeatureAddNoCarryInsts : SubtargetFeature<"add-no-carry-insts",
+  "AddNoCarryInsts",
+  "true",
+  "Have VALU add/sub instructions without carry out"
+>;
+
 def FeatureUnalignedBufferAccess : SubtargetFeature<"unaligned-buffer-access",
   "UnalignedBufferAccess",
   "true",
@@ -119,7 +125,7 @@ def FeatureXNACK : SubtargetFeature<"xnack",
 def FeatureSGPRInitBug : SubtargetFeature<"sgpr-init-bug",
   "SGPRInitBug",
   "true",
-  "VI SGPR initilization bug requiring a fixed SGPR allocation size"
+  "VI SGPR initialization bug requiring a fixed SGPR allocation size"
 >;
 
 class SubtargetFeatureFetchLimit <string Value> :
@@ -164,12 +170,6 @@ def FeatureGCN : SubtargetFeature<"gcn",
   "IsGCN",
   "true",
   "GCN or newer GPU"
->;
-
-def FeatureGCN1Encoding : SubtargetFeature<"gcn1-encoding",
-  "GCN1Encoding",
-  "true",
-  "Encoding format for SI and CI"
 >;
 
 def FeatureGCN3Encoding : SubtargetFeature<"gcn3-encoding",
@@ -262,8 +262,8 @@ def FeatureSDWAMac : SubtargetFeature<"sdwa-mav",
   "Support v_mac_f32/f16 with SDWA (Sub-DWORD Addressing) extension"
 >;
 
-def FeatureSDWAClampVOPC : SubtargetFeature<"sdwa-clamp-vopc",
-  "HasSDWAClampVOPC",
+def FeatureSDWAOutModsVOPC : SubtargetFeature<"sdwa-out-mods-vopc",
+  "HasSDWAOutModsVOPC",
   "true",
   "Support clamp for VOPC with SDWA (Sub-DWORD Addressing) extension"
 >;
@@ -436,14 +436,14 @@ def FeatureNorthernIslands : SubtargetFeatureGeneration<"NORTHERN_ISLANDS",
 
 def FeatureSouthernIslands : SubtargetFeatureGeneration<"SOUTHERN_ISLANDS",
   [FeatureFP64, FeatureLocalMemorySize32768,
-  FeatureWavefrontSize64, FeatureGCN, FeatureGCN1Encoding,
+  FeatureWavefrontSize64, FeatureGCN,
   FeatureLDSBankCount32, FeatureMovrel]
 >;
 
 def FeatureSeaIslands : SubtargetFeatureGeneration<"SEA_ISLANDS",
   [FeatureFP64, FeatureLocalMemorySize65536,
   FeatureWavefrontSize64, FeatureGCN, FeatureFlatAddressSpace,
-  FeatureGCN1Encoding, FeatureCIInsts, FeatureMovrel]
+  FeatureCIInsts, FeatureMovrel]
 >;
 
 def FeatureVolcanicIslands : SubtargetFeatureGeneration<"VOLCANIC_ISLANDS",
@@ -452,7 +452,7 @@ def FeatureVolcanicIslands : SubtargetFeatureGeneration<"VOLCANIC_ISLANDS",
    FeatureGCN3Encoding, FeatureCIInsts, Feature16BitInsts,
    FeatureSMemRealTime, FeatureVGPRIndexMode, FeatureMovrel,
    FeatureScalarStores, FeatureInv2PiInlineImm,
-   FeatureSDWA, FeatureSDWAClampVOPC, FeatureSDWAMac, FeatureDPP
+   FeatureSDWA, FeatureSDWAOutModsVOPC, FeatureSDWAMac, FeatureDPP
   ]
 >;
 
@@ -464,7 +464,8 @@ def FeatureGFX9 : SubtargetFeatureGeneration<"GFX9",
    FeatureApertureRegs, FeatureGFX9Insts, FeatureVOP3P, FeatureVGPRIndexMode,
    FeatureFastFMAF32, FeatureDPP,
    FeatureSDWA, FeatureSDWAOmod, FeatureSDWAScalar, FeatureSDWASdst,
-   FeatureFlatInstOffsets, FeatureFlatGlobalInsts, FeatureFlatScratchInsts
+   FeatureFlatInstOffsets, FeatureFlatGlobalInsts, FeatureFlatScratchInsts,
+   FeatureAddNoCarryInsts
   ]
 >;
 
@@ -480,14 +481,14 @@ class SubtargetFeatureISAVersion <int Major, int Minor, int Stepping,
 
 def FeatureISAVersion6_0_0 : SubtargetFeatureISAVersion <6,0,0,
   [FeatureSouthernIslands,
-   FeatureFastFMAF32, 
+   FeatureFastFMAF32,
    HalfRate64Ops,
    FeatureLDSBankCount32]>;
 
 def FeatureISAVersion6_0_1 : SubtargetFeatureISAVersion <6,0,1,
   [FeatureSouthernIslands,
    FeatureLDSBankCount32]>;
-   
+
 def FeatureISAVersion7_0_0 : SubtargetFeatureISAVersion <7,0,0,
   [FeatureSeaIslands,
    FeatureLDSBankCount32]>;
@@ -660,7 +661,7 @@ def TruePredicate : Predicate<"true">;
 def isSICI : Predicate<
   "Subtarget->getGeneration() == AMDGPUSubtarget::SOUTHERN_ISLANDS ||"
   "Subtarget->getGeneration() == AMDGPUSubtarget::SEA_ISLANDS"
->, AssemblerPredicate<"FeatureGCN1Encoding">;
+>, AssemblerPredicate<"!FeatureGCN3Encoding">;
 
 def isVI : Predicate <
   "Subtarget->getGeneration() >= AMDGPUSubtarget::VOLCANIC_ISLANDS">,
@@ -680,6 +681,14 @@ def HasFlatAddressSpace : Predicate<"Subtarget->hasFlatAddressSpace()">,
 
 def HasFlatGlobalInsts : Predicate<"Subtarget->hasFlatGlobalInsts()">,
   AssemblerPredicate<"FeatureFlatGlobalInsts">;
+def HasFlatScratchInsts : Predicate<"Subtarget->hasFlatScratchInsts()">,
+  AssemblerPredicate<"FeatureFlatScratchInsts">;
+
+def HasAddNoCarryInsts : Predicate<"Subtarget->hasAddNoCarryInsts()">,
+  AssemblerPredicate<"FeatureAddNoCarryInsts">;
+
+def NotHasAddNoCarryInsts : Predicate<"!Subtarget->hasAddNoCarryInsts()">,
+  AssemblerPredicate<"!FeatureAddNoCarryInsts">;
 
 def Has16BitInsts : Predicate<"Subtarget->has16BitInsts()">,
   AssemblerPredicate<"Feature16BitInsts">;

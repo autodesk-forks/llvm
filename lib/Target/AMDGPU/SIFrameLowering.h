@@ -39,6 +39,11 @@ public:
     MachineFunction &MF,
     RegScavenger *RS = nullptr) const override;
 
+  MachineBasicBlock::iterator
+  eliminateCallFramePseudoInstr(MachineFunction &MF,
+                                MachineBasicBlock &MBB,
+                                MachineBasicBlock::iterator MI) const override;
+
 private:
   void emitFlatScratchInit(const SISubtarget &ST,
                            MachineFunction &MF,
@@ -60,6 +65,10 @@ private:
 
   /// \brief Emits debugger prologue.
   void emitDebuggerPrologue(MachineFunction &MF, MachineBasicBlock &MBB) const;
+
+public:
+  bool hasFP(const MachineFunction &MF) const override;
+  bool hasSP(const MachineFunction &MF) const;
 };
 
 } // end namespace llvm

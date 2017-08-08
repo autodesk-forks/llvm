@@ -140,8 +140,6 @@ struct FunctionSummaryYaml {
 } // End yaml namespace
 } // End llvm namespace
 
-LLVM_YAML_IS_FLOW_SEQUENCE_VECTOR(uint64_t)
-
 namespace llvm {
 namespace yaml {
 
@@ -188,7 +186,6 @@ template <> struct MappingTraits<FunctionSummaryYaml> {
 
 LLVM_YAML_IS_STRING_MAP(TypeIdSummary)
 LLVM_YAML_IS_SEQUENCE_VECTOR(FunctionSummaryYaml)
-LLVM_YAML_IS_FLOW_SEQUENCE_VECTOR(std::string)
 
 namespace llvm {
 namespace yaml {
@@ -209,8 +206,9 @@ template <> struct CustomMappingTraits<GlobalValueSummaryMapTy> {
           GlobalValueSummary::GVFlags(
               static_cast<GlobalValue::LinkageTypes>(FSum.Linkage),
               FSum.NotEligibleToImport, FSum.Live),
-          0, ArrayRef<ValueInfo>{}, ArrayRef<FunctionSummary::EdgeTy>{},
-          std::move(FSum.TypeTests), std::move(FSum.TypeTestAssumeVCalls),
+          0, FunctionSummary::FFlags{}, ArrayRef<ValueInfo>{},
+          ArrayRef<FunctionSummary::EdgeTy>{}, std::move(FSum.TypeTests),
+          std::move(FSum.TypeTestAssumeVCalls),
           std::move(FSum.TypeCheckedLoadVCalls),
           std::move(FSum.TypeTestAssumeConstVCalls),
           std::move(FSum.TypeCheckedLoadConstVCalls)));

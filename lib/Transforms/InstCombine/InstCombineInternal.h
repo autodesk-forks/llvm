@@ -21,8 +21,6 @@
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/TargetFolder.h"
 #include "llvm/Analysis/ValueTracking.h"
-#include "llvm/BinaryFormat/Dwarf.h"
-#include "llvm/IR/DIBuilder.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstVisitor.h"
@@ -44,6 +42,7 @@ class TargetLibraryInfo;
 class DbgDeclareInst;
 class MemIntrinsic;
 class MemSetInst;
+class OptimizationRemarkEmitter;
 
 /// Assign a complexity or rank value to LLVM Values. This is used to reduce
 /// the amount of pattern matching needed for compares and commutative
@@ -131,11 +130,10 @@ static inline bool IsFreeToInvert(Value *V, bool WillInvertAllUses) {
     return true;
 
   // A vector of constant integers can be inverted easily.
-  Constant *CV;
-  if (V->getType()->isVectorTy() && match(V, PatternMatch::m_Constant(CV))) {
+  if (V->getType()->isVectorTy() && isa<Constant>(V)) {
     unsigned NumElts = V->getType()->getVectorNumElements();
     for (unsigned i = 0; i != NumElts; ++i) {
-      Constant *Elt = CV->getAggregateElement(i);
+      Constant *Elt = cast<Constant>(V)->getAggregateElement(i);
       if (!Elt)
         return false;
 
@@ -213,7 +211,7 @@ public:
   /// \brief An IRBuilder that automatically inserts new instructions into the
   /// worklist.
   typedef IRBuilder<TargetFolder, IRBuilderCallbackInserter> BuilderTy;
-  BuilderTy *Builder;
+  BuilderTy &Builder;
 
 private:
   // Mode in which we are running the combiner.
@@ -229,6 +227,7 @@ private:
   DominatorTree &DT;
   const DataLayout &DL;
   const SimplifyQuery SQ;
+  OptimizationRemarkEmitter &ORE;
   // Optional analyses. When non-null, these can both be used to do better
   // combining and will be updated to reflect any changes.
   LoopInfo *LI;
@@ -236,13 +235,14 @@ private:
   bool MadeIRChange;
 
 public:
-  InstCombiner(InstCombineWorklist &Worklist, BuilderTy *Builder,
+  InstCombiner(InstCombineWorklist &Worklist, BuilderTy &Builder,
                bool MinimizeSize, bool ExpensiveCombines, AliasAnalysis *AA,
                AssumptionCache &AC, TargetLibraryInfo &TLI, DominatorTree &DT,
-               const DataLayout &DL, LoopInfo *LI)
+               OptimizationRemarkEmitter &ORE, const DataLayout &DL,
+               LoopInfo *LI)
       : Worklist(Worklist), Builder(Builder), MinimizeSize(MinimizeSize),
         ExpensiveCombines(ExpensiveCombines), AA(AA), AC(AC), TLI(TLI), DT(DT),
-        DL(DL), SQ(DL, &TLI, &DT, &AC), LI(LI), MadeIRChange(false) {}
+        DL(DL), SQ(DL, &TLI, &DT, &AC), ORE(ORE), LI(LI), MadeIRChange(false) {}
 
   /// \brief Run the combiner over the entire worklist until it is empty.
   ///
@@ -439,7 +439,7 @@ private:
   Instruction *scalarizePHI(ExtractElementInst &EI, PHINode *PN);
   Value *EvaluateInDifferentElementOrder(Value *V, ArrayRef<int> Mask);
   Instruction *foldCastedBitwiseLogic(BinaryOperator &I);
-  Instruction *shrinkBitwiseLogic(TruncInst &Trunc);
+  Instruction *narrowBinOp(TruncInst &Trunc);
   Instruction *optimizeBitCastFromPhi(CastInst &CI, PHINode *PN);
 
   /// Determine if a pair of casts can be replaced by a single cast.
@@ -599,9 +599,17 @@ private:
 
   /// This tries to simplify binary operations by factorizing out common terms
   /// (e. g. "(A*B)+(A*C)" -> "A*(B+C)").
-  Value *tryFactorization(InstCombiner::BuilderTy *, BinaryOperator &,
-                          Instruction::BinaryOps, Value *, Value *, Value *,
-                          Value *);
+  Value *tryFactorization(BinaryOperator &, Instruction::BinaryOps, Value *,
+                          Value *, Value *, Value *);
+
+  /// Match a select chain which produces one of three values based on whether
+  /// the LHS is less than, equal to, or greater than RHS respectively.
+  /// Return true if we matched a three way compare idiom. The LHS, RHS, Less,
+  /// Equal and Greater values are saved in the matching process and returned to
+  /// the caller.
+  bool matchThreeWayIntCompare(SelectInst *SI, Value *&LHS, Value *&RHS,
+                               ConstantInt *&Less, ConstantInt *&Equal,
+                               ConstantInt *&Greater);
 
   /// \brief Attempts to replace V with a simpler value based on the demanded
   /// bits.
@@ -631,7 +639,6 @@ private:
                                     APInt &UndefElts, unsigned Depth = 0);
 
   Value *SimplifyVectorOp(BinaryOperator &Inst);
-  Value *SimplifyBSwap(BinaryOperator &Inst);
 
 
   /// Given a binary operator, cast instruction, or select which has a PHI node
@@ -680,6 +687,8 @@ private:
   Instruction *foldICmpBinOp(ICmpInst &Cmp);
   Instruction *foldICmpEquality(ICmpInst &Cmp);
 
+  Instruction *foldICmpSelectConstant(ICmpInst &Cmp, Instruction *Select,
+                                      ConstantInt *C);
   Instruction *foldICmpTruncConstant(ICmpInst &Cmp, Instruction *Trunc,
                                      const APInt *C);
   Instruction *foldICmpAndConstant(ICmpInst &Cmp, BinaryOperator *And,

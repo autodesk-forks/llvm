@@ -31,20 +31,19 @@ using namespace llvm;
 STATISTIC(NumDeleted, "Number of loops deleted");
 
 /// This function deletes dead loops. The caller of this function needs to
-/// guarantee that the loop is infact dead.  Here we handle two kinds of dead
+/// guarantee that the loop is infact dead. Here we handle two kinds of dead
 /// loop. The first kind (\p isLoopDead) is where only invariant values from
 /// within the loop are used outside of it. The second kind (\p
 /// isLoopNeverExecuted) is where the loop is provably never executed. We can
-/// always remove never executed loops since they will not cause any
-/// difference to program behaviour.
+/// always remove never executed loops since they will not cause any difference
+/// to program behaviour.
 /// 
 /// This also updates the relevant analysis information in \p DT, \p SE, and \p
 /// LI. It also updates the loop PM if an updater struct is provided.
 // TODO: This function will be used by loop-simplifyCFG as well. So, move this
 // to LoopUtils.cpp
 static void deleteDeadLoop(Loop *L, DominatorTree &DT, ScalarEvolution &SE,
-                           LoopInfo &LI, bool LoopIsNeverExecuted,
-                           LPMUpdater *Updater = nullptr);
+                           LoopInfo &LI, LPMUpdater *Updater = nullptr);
 /// Determines if a loop is dead.
 ///
 /// This assumes that we've already checked for unique exit and exiting blocks,
@@ -149,26 +148,35 @@ static bool deleteLoopIfDead(Loop *L, DominatorTree &DT, ScalarEvolution &SE,
                              LoopInfo &LI, LPMUpdater *Updater = nullptr) {
   assert(L->isLCSSAForm(DT) && "Expected LCSSA!");
 
-  // We can only remove the loop if there is a preheader that we can
-  // branch from after removing it.
+  // We can only remove the loop if there is a preheader that we can branch from
+  // after removing it. Also, if LoopSimplify form is not available, stay out
+  // of trouble.
   BasicBlock *Preheader = L->getLoopPreheader();
-  if (!Preheader)
+  if (!Preheader || !L->hasDedicatedExits()) {
+    DEBUG(dbgs()
+          << "Deletion requires Loop with preheader and dedicated exits.\n");
     return false;
-
-  // If LoopSimplify form is not available, stay out of trouble.
-  if (!L->hasDedicatedExits())
-    return false;
-
+  }
   // We can't remove loops that contain subloops.  If the subloops were dead,
   // they would already have been removed in earlier executions of this pass.
-  if (L->begin() != L->end())
+  if (L->begin() != L->end()) {
+    DEBUG(dbgs() << "Loop contains subloops.\n");
     return false;
+  }
 
 
   BasicBlock *ExitBlock = L->getUniqueExitBlock();
 
   if (ExitBlock && isLoopNeverExecuted(L)) {
-    deleteDeadLoop(L, DT, SE, LI, true /* LoopIsNeverExecuted */, Updater);
+    DEBUG(dbgs() << "Loop is proven to never execute, delete it!");
+    // Set incoming value to undef for phi nodes in the exit block.
+    BasicBlock::iterator BI = ExitBlock->begin();
+    while (PHINode *P = dyn_cast<PHINode>(BI)) {
+      for (unsigned i = 0; i < P->getNumIncomingValues(); i++)
+        P->setIncomingValue(i, UndefValue::get(P->getType()));
+      BI++;
+    }
+    deleteDeadLoop(L, DT, SE, LI, Updater);
     ++NumDeleted;
     return true;
   }
@@ -182,29 +190,34 @@ static bool deleteLoopIfDead(Loop *L, DominatorTree &DT, ScalarEvolution &SE,
   // be in the situation of needing to be able to solve statically which exit
   // block will be branched to, or trying to preserve the branching logic in
   // a loop invariant manner.
-  if (!ExitBlock)
+  if (!ExitBlock) {
+    DEBUG(dbgs() << "Deletion requires single exit block\n");
     return false;
-
+  }
   // Finally, we have to check that the loop really is dead.
   bool Changed = false;
-  if (!isLoopDead(L, SE, ExitingBlocks, ExitBlock, Changed, Preheader))
+  if (!isLoopDead(L, SE, ExitingBlocks, ExitBlock, Changed, Preheader)) {
+    DEBUG(dbgs() << "Loop is not invariant, cannot delete.\n");
     return Changed;
+  }
 
   // Don't remove loops for which we can't solve the trip count.
   // They could be infinite, in which case we'd be changing program behavior.
   const SCEV *S = SE.getMaxBackedgeTakenCount(L);
-  if (isa<SCEVCouldNotCompute>(S))
+  if (isa<SCEVCouldNotCompute>(S)) {
+    DEBUG(dbgs() << "Could not compute SCEV MaxBackedgeTakenCount.\n");
     return Changed;
+  }
 
-  deleteDeadLoop(L, DT, SE, LI, false /* LoopIsNeverExecuted */, Updater);
+  DEBUG(dbgs() << "Loop is invariant, delete it!");
+  deleteDeadLoop(L, DT, SE, LI, Updater);
   ++NumDeleted;
 
   return true;
 }
 
 static void deleteDeadLoop(Loop *L, DominatorTree &DT, ScalarEvolution &SE,
-                           LoopInfo &LI, bool LoopIsNeverExecuted,
-                           LPMUpdater *Updater) {
+                           LoopInfo &LI, LPMUpdater *Updater) {
   assert(L->isLCSSAForm(DT) && "Expected LCSSA!");
   auto *Preheader = L->getLoopPreheader();
   assert(Preheader && "Preheader should exist!");
@@ -226,52 +239,83 @@ static void deleteDeadLoop(Loop *L, DominatorTree &DT, ScalarEvolution &SE,
 
   auto *ExitBlock = L->getUniqueExitBlock();
   assert(ExitBlock && "Should have a unique exit block!");
+  assert(L->hasDedicatedExits() && "Loop should have dedicated exits!");
 
-  // Connect the preheader directly to the exit block.
+  auto *OldBr = dyn_cast<BranchInst>(Preheader->getTerminator());
+  assert(OldBr && "Preheader must end with a branch");
+  assert(OldBr->isUnconditional() && "Preheader must have a single successor");
+  // Connect the preheader to the exit block. Keep the old edge to the header
+  // around to perform the dominator tree update in two separate steps
+  // -- #1 insertion of the edge preheader -> exit and #2 deletion of the edge
+  // preheader -> header.
+  //
+  //
+  // 0.  Preheader          1.  Preheader           2.  Preheader
+  //        |                    |   |                   |
+  //        V                    |   V                   |
+  //      Header <--\            | Header <--\           | Header <--\
+  //       |  |     |            |  |  |     |           |  |  |     |
+  //       |  V     |            |  |  V     |           |  |  V     |
+  //       | Body --/            |  | Body --/           |  | Body --/
+  //       V                     V  V                    V  V
+  //      Exit                   Exit                    Exit
+  //
+  // By doing this is two separate steps we can perform the dominator tree
+  // update without using the batch update API.
+  //
   // Even when the loop is never executed, we cannot remove the edge from the
   // source block to the exit block. Consider the case where the unexecuted loop
   // branches back to an outer loop. If we deleted the loop and removed the edge
   // coming to this inner loop, this will break the outer loop structure (by
   // deleting the backedge of the outer loop). If the outer loop is indeed a
   // non-loop, it will be deleted in a future iteration of loop deletion pass.
-  Preheader->getTerminator()->replaceUsesOfWith(L->getHeader(), ExitBlock);
+  IRBuilder<> Builder(OldBr);
+  Builder.CreateCondBr(Builder.getFalse(), L->getHeader(), ExitBlock);
+  // Remove the old branch. The conditional branch becomes a new terminator.
+  OldBr->eraseFromParent();
 
-  SmallVector<BasicBlock *, 4> ExitingBlocks;
-  L->getExitingBlocks(ExitingBlocks);
+  // Update the dominator tree by informing it about the new edge from the
+  // preheader to the exit.
+  DT.insertEdge(Preheader, ExitBlock);
+
   // Rewrite phis in the exit block to get their inputs from the Preheader
   // instead of the exiting block.
-  BasicBlock *ExitingBlock = ExitingBlocks[0];
   BasicBlock::iterator BI = ExitBlock->begin();
   while (PHINode *P = dyn_cast<PHINode>(BI)) {
-    int j = P->getBasicBlockIndex(ExitingBlock);
-    assert(j >= 0 && "Can't find exiting block in exit block's phi node!");
-    if (LoopIsNeverExecuted)
-      P->setIncomingValue(j, UndefValue::get(P->getType()));
-    P->setIncomingBlock(j, Preheader);
-    for (unsigned i = 1; i < ExitingBlocks.size(); ++i)
-      P->removeIncomingValue(ExitingBlocks[i]);
+    // Set the zero'th element of Phi to be from the preheader and remove all
+    // other incoming values. Given the loop has dedicated exits, all other
+    // incoming values must be from the exiting blocks.
+    int PredIndex = 0;
+    P->setIncomingBlock(PredIndex, Preheader);
+    // Removes all incoming values from all other exiting blocks (including
+    // duplicate values from an exiting block).
+    // Nuke all entries except the zero'th entry which is the preheader entry.
+    // NOTE! We need to remove Incoming Values in the reverse order as done
+    // below, to keep the indices valid for deletion (removeIncomingValues
+    // updates getNumIncomingValues and shifts all values down into the operand
+    // being deleted).
+    for (unsigned i = 0, e = P->getNumIncomingValues() - 1; i != e; ++i)
+      P->removeIncomingValue(e-i, false);
+
+    assert((P->getNumIncomingValues() == 1 &&
+            P->getIncomingBlock(PredIndex) == Preheader) &&
+           "Should have exactly one value and that's from the preheader!");
     ++BI;
   }
 
-  // Update the dominator tree and remove the instructions and blocks that will
-  // be deleted from the reference counting scheme.
-  SmallVector<DomTreeNode*, 8> ChildNodes;
-  for (Loop::block_iterator LI = L->block_begin(), LE = L->block_end();
-       LI != LE; ++LI) {
-    // Move all of the block's children to be children of the Preheader, which
-    // allows us to remove the domtree entry for the block.
-    ChildNodes.insert(ChildNodes.begin(), DT[*LI]->begin(), DT[*LI]->end());
-    for (DomTreeNode *ChildNode : ChildNodes) {
-      DT.changeImmediateDominator(ChildNode, DT[Preheader]);
-    }
+  // Disconnect the loop body by branching directly to its exit.
+  Builder.SetInsertPoint(Preheader->getTerminator());
+  Builder.CreateBr(ExitBlock);
+  // Remove the old branch.
+  Preheader->getTerminator()->eraseFromParent();
 
-    ChildNodes.clear();
-    DT.eraseNode(*LI);
+  // Inform the dominator tree about the removed edge.
+  DT.deleteEdge(Preheader, L->getHeader());
 
-    // Remove the block from the reference counting scheme, so that we can
-    // delete it freely later.
-    (*LI)->dropAllReferences();
-  }
+  // Remove the block from the reference counting scheme, so that we can
+  // delete it freely later.
+  for (auto *Block : L->blocks())
+    Block->dropAllReferences();
 
   // Erase the instructions and the blocks without having to worry
   // about ordering because we already dropped the references.
@@ -296,6 +340,9 @@ static void deleteDeadLoop(Loop *L, DominatorTree &DT, ScalarEvolution &SE,
 PreservedAnalyses LoopDeletionPass::run(Loop &L, LoopAnalysisManager &AM,
                                         LoopStandardAnalysisResults &AR,
                                         LPMUpdater &Updater) {
+
+  DEBUG(dbgs() << "Analyzing Loop for deletion: ");
+  DEBUG(L.dump());
   if (!deleteLoopIfDead(&L, AR.DT, AR.SE, AR.LI, &Updater))
     return PreservedAnalyses::all();
 
@@ -335,5 +382,7 @@ bool LoopDeletionLegacyPass::runOnLoop(Loop *L, LPPassManager &) {
   ScalarEvolution &SE = getAnalysis<ScalarEvolutionWrapperPass>().getSE();
   LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
 
+  DEBUG(dbgs() << "Analyzing Loop for deletion: ");
+  DEBUG(L->dump());
   return deleteLoopIfDead(L, DT, SE, LI);
 }

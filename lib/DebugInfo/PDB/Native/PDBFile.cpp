@@ -150,8 +150,7 @@ Error PDBFile::parseFileHeaders() {
       MappedBlockStream::createFpmStream(ContainerLayout, *Buffer, Allocator);
   BinaryStreamReader FpmReader(*FpmStream);
   ArrayRef<uint8_t> FpmBytes;
-  if (auto EC = FpmReader.readBytes(FpmBytes,
-                                    msf::getFullFpmByteSize(ContainerLayout)))
+  if (auto EC = FpmReader.readBytes(FpmBytes, FpmReader.bytesRemaining()))
     return EC;
   uint32_t BlocksRemaining = getBlockCount();
   uint32_t BI = 0;
@@ -228,6 +227,18 @@ Error PDBFile::parseStreamData() {
 
 ArrayRef<support::ulittle32_t> PDBFile::getDirectoryBlockArray() const {
   return ContainerLayout.DirectoryBlocks;
+}
+
+MSFStreamLayout PDBFile::getStreamLayout(uint32_t StreamIdx) const {
+  MSFStreamLayout Result;
+  auto Blocks = getStreamBlockList(StreamIdx);
+  Result.Blocks.assign(Blocks.begin(), Blocks.end());
+  Result.Length = getStreamByteSize(StreamIdx);
+  return Result;
+}
+
+msf::MSFStreamLayout PDBFile::getFpmStreamLayout() const {
+  return msf::getFpmStreamLayout(ContainerLayout);
 }
 
 Expected<GlobalsStream &> PDBFile::getPDBGlobalsStream() {
@@ -310,8 +321,7 @@ Expected<PublicsStream &> PDBFile::getPDBPublicsStream() {
         ContainerLayout, *Buffer, DbiS->getPublicSymbolStreamIndex());
     if (!PublicS)
       return PublicS.takeError();
-    auto TempPublics =
-        llvm::make_unique<PublicsStream>(*this, std::move(*PublicS));
+    auto TempPublics = llvm::make_unique<PublicsStream>(std::move(*PublicS));
     if (auto EC = TempPublics->reload())
       return std::move(EC);
     Publics = std::move(TempPublics);
@@ -377,8 +387,11 @@ bool PDBFile::hasPDBDbiStream() const { return StreamDBI < getNumStreams(); }
 
 bool PDBFile::hasPDBGlobalsStream() {
   auto DbiS = getPDBDbiStream();
-  if (!DbiS)
+  if (!DbiS) {
+    consumeError(DbiS.takeError());
     return false;
+  }
+
   return DbiS->getGlobalSymbolStreamIndex() < getNumStreams();
 }
 
@@ -388,8 +401,10 @@ bool PDBFile::hasPDBIpiStream() const { return StreamIPI < getNumStreams(); }
 
 bool PDBFile::hasPDBPublicsStream() {
   auto DbiS = getPDBDbiStream();
-  if (!DbiS)
+  if (!DbiS) {
+    consumeError(DbiS.takeError());
     return false;
+  }
   return DbiS->getPublicSymbolStreamIndex() < getNumStreams();
 }
 

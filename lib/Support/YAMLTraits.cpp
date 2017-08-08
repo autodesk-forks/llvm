@@ -10,6 +10,7 @@
 #include "llvm/Support/YAMLTraits.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/Casting.h"
@@ -54,6 +55,14 @@ void IO::setContext(void *Context) {
 Input::Input(StringRef InputContent, void *Ctxt,
              SourceMgr::DiagHandlerTy DiagHandler, void *DiagHandlerCtxt)
     : IO(Ctxt), Strm(new Stream(InputContent, SrcMgr, false, &EC)) {
+  if (DiagHandler)
+    SrcMgr.setDiagHandler(DiagHandler, DiagHandlerCtxt);
+  DocIterator = Strm->begin();
+}
+
+Input::Input(MemoryBufferRef Input, void *Ctxt,
+             SourceMgr::DiagHandlerTy DiagHandler, void *DiagHandlerCtxt)
+    : IO(Ctxt), Strm(new Stream(Input, SrcMgr, false, &EC)) {
   if (DiagHandler)
     SrcMgr.setDiagHandler(DiagHandler, DiagHandlerCtxt);
   DocIterator = Strm->begin();
@@ -912,12 +921,9 @@ void ScalarTraits<double>::output(const double &Val, void *, raw_ostream &Out) {
 }
 
 StringRef ScalarTraits<double>::input(StringRef Scalar, void *, double &Val) {
-  SmallString<32> buff(Scalar.begin(), Scalar.end());
-  char *end;
-  Val = strtod(buff.c_str(), &end);
-  if (*end != '\0')
-    return "invalid floating point number";
-  return StringRef();
+  if (to_float(Scalar, Val))
+    return StringRef();
+  return "invalid floating point number";
 }
 
 void ScalarTraits<float>::output(const float &Val, void *, raw_ostream &Out) {
@@ -925,12 +931,9 @@ void ScalarTraits<float>::output(const float &Val, void *, raw_ostream &Out) {
 }
 
 StringRef ScalarTraits<float>::input(StringRef Scalar, void *, float &Val) {
-  SmallString<32> buff(Scalar.begin(), Scalar.end());
-  char *end;
-  Val = strtod(buff.c_str(), &end);
-  if (*end != '\0')
-    return "invalid floating point number";
-  return StringRef();
+  if (to_float(Scalar, Val))
+    return StringRef();
+  return "invalid floating point number";
 }
 
 void ScalarTraits<Hex8>::output(const Hex8 &Val, void *, raw_ostream &Out) {

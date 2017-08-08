@@ -698,6 +698,9 @@ struct coff_resource_dir_entry {
     uint32_t getNameOffset() const {
       return maskTrailingOnes<uint32_t>(31) & NameOffset;
     }
+    // Even though the PE/COFF spec doesn't mention this, the high bit of a name
+    // offset is set.
+    void setNameOffset(uint32_t Offset) { NameOffset = Offset | (1 << 31); }
   } Identifier;
   union {
     support::ulittle32_t DataEntryOffset;
@@ -750,7 +753,7 @@ private:
   const debug_directory *DebugDirectoryBegin;
   const debug_directory *DebugDirectoryEnd;
   // Either coff_load_configuration32 or coff_load_configuration64.
-  const void *LoadConfig;
+  const void *LoadConfig = nullptr;
 
   std::error_code getString(uint32_t offset, StringRef &Res) const;
 
@@ -1026,7 +1029,7 @@ public:
   bool isRelocatableObject() const override;
   bool is64() const { return PE32PlusHeader; }
 
-  static inline bool classof(const Binary *v) { return v->isCOFF(); }
+  static bool classof(const Binary *v) { return v->isCOFF(); }
 };
 
 // The iterator for the import directory table.
