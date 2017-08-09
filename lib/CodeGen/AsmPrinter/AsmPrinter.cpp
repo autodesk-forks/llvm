@@ -631,7 +631,9 @@ void AsmPrinter::EmitFunctionHeader() {
   const Function *F = MF->getFunction();
 
   if (isVerbose())
-    OutStreamer->GetCommentOS() << "-- Begin function " << F->getName() << '\n';
+    OutStreamer->GetCommentOS()
+        << "-- Begin function "
+        << GlobalValue::dropLLVMManglingEscape(F->getName()) << '\n';
 
   // Print out constants referenced by the function
   EmitConstantPool();
@@ -899,7 +901,7 @@ static bool emitDebugValueComment(const MachineInstr *MI, AsmPrinter &AP) {
   return true;
 }
 
-AsmPrinter::CFIMoveType AsmPrinter::needsCFIMoves() {
+AsmPrinter::CFIMoveType AsmPrinter::needsCFIMoves() const {
   if (MAI->getExceptionHandlingType() == ExceptionHandling::DwarfCFI &&
       MF->getFunction()->needsUnwindTableEntry())
     return CFI_M_EH;

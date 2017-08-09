@@ -58,7 +58,7 @@ protected:
   virtual void parseImpl(DWARFContext &Context, const DWARFSection &Section,
                          const DWARFDebugAbbrev *DA, const DWARFSection *RS,
                          StringRef SS, const DWARFSection &SOS,
-                         const DWARFSection *AOS, StringRef LS,
+                         const DWARFSection *AOS, const DWARFSection &LS,
                          bool isLittleEndian, bool isDWO) = 0;
 };
 
@@ -91,7 +91,7 @@ private:
   void parseImpl(DWARFContext &Context, const DWARFSection &Section,
                  const DWARFDebugAbbrev *DA, const DWARFSection *RS,
                  StringRef SS, const DWARFSection &SOS, const DWARFSection *AOS,
-                 StringRef LS, bool LE, bool IsDWO) override {
+                 const DWARFSection &LS, bool LE, bool IsDWO) override {
     if (Parsed)
       return;
     const auto &Index = getDWARFUnitIndex(Context, UnitType::Section);
@@ -118,12 +118,12 @@ class DWARFUnit {
   const DWARFDebugAbbrev *Abbrev;
   const DWARFSection *RangeSection;
   uint32_t RangeSectionBase;
-  StringRef LineSection;
+  const DWARFSection &LineSection;
   StringRef StringSection;
   const DWARFSection &StringOffsetSection;
   uint64_t StringOffsetSectionBase = 0;
   const DWARFSection *AddrOffsetSection;
-  uint32_t AddrOffsetSectionBase;
+  uint32_t AddrOffsetSectionBase = 0;
   bool isLittleEndian;
   bool isDWO;
   const DWARFUnitSectionBase &UnitSection;
@@ -166,15 +166,16 @@ protected:
 public:
   DWARFUnit(DWARFContext &Context, const DWARFSection &Section,
             const DWARFDebugAbbrev *DA, const DWARFSection *RS, StringRef SS,
-            const DWARFSection &SOS, const DWARFSection *AOS, StringRef LS,
-            bool LE, bool IsDWO, const DWARFUnitSectionBase &UnitSection,
+            const DWARFSection &SOS, const DWARFSection *AOS,
+            const DWARFSection &LS, bool LE, bool IsDWO,
+            const DWARFUnitSectionBase &UnitSection,
             const DWARFUnitIndex::Entry *IndexEntry = nullptr);
 
   virtual ~DWARFUnit();
 
   DWARFContext& getContext() const { return Context; }
 
-  StringRef getLineSection() const { return LineSection; }
+  const DWARFSection &getLineSection() const { return LineSection; }
   StringRef getStringSection() const { return StringSection; }
   const DWARFSection &getStringOffsetSection() const {
     return StringOffsetSection;
@@ -196,19 +197,12 @@ public:
   bool getAddrOffsetSectionItem(uint32_t Index, uint64_t &Result) const;
   bool getStringOffsetSectionItem(uint32_t Index, uint64_t &Result) const;
 
-  DataExtractor getDebugInfoExtractor() const {
-    return DataExtractor(InfoSection.Data, isLittleEndian,
-                         getAddressByteSize());
-  }
+  DWARFDataExtractor getDebugInfoExtractor() const;
 
   DataExtractor getStringExtractor() const {
     return DataExtractor(StringSection, false, 0);
   }
 
-  const RelocAddrMap *getRelocMap() const { return &InfoSection.Relocs; }
-  const RelocAddrMap &getStringOffsetsRelocMap() const {
-    return StringOffsetSection.Relocs;
-  }
 
   bool extract(DataExtractor debug_info, uint32_t* offset_ptr);
 
@@ -236,6 +230,34 @@ public:
   }
 
   uint8_t getUnitType() const { return UnitType; }
+
+  static bool isValidUnitType(uint8_t UnitType) {
+    return UnitType == dwarf::DW_UT_compile || UnitType == dwarf::DW_UT_type ||
+           UnitType == dwarf::DW_UT_partial ||
+           UnitType == dwarf::DW_UT_skeleton ||
+           UnitType == dwarf::DW_UT_split_compile ||
+           UnitType == dwarf::DW_UT_split_type;
+  }
+
+  /// \brief Return the number of bytes for the header of a unit of
+  /// UnitType type.
+  ///
+  /// This function must be called with a valid unit type which in
+  /// DWARF5 is defined as one of the following six types.
+  static uint32_t getDWARF5HeaderSize(uint8_t UnitType) {
+    switch (UnitType) {
+    case dwarf::DW_UT_compile:
+    case dwarf::DW_UT_partial:
+      return 12;
+    case dwarf::DW_UT_skeleton:
+    case dwarf::DW_UT_split_compile:
+      return 20;
+    case dwarf::DW_UT_type:
+    case dwarf::DW_UT_split_type:
+      return 24;
+    }
+    llvm_unreachable("Invalid UnitType.");
+  }
 
   uint64_t getBaseAddress() const { return BaseAddr; }
 

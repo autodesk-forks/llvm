@@ -62,6 +62,52 @@ uint32_t DWARFAcceleratorTable::getHeaderDataLength() {
   return Hdr.HeaderDataLength;
 }
 
+ArrayRef<std::pair<DWARFAcceleratorTable::HeaderData::AtomType,
+                   DWARFAcceleratorTable::HeaderData::Form>>
+DWARFAcceleratorTable::getAtomsDesc() {
+  return HdrData.Atoms;
+}
+
+bool DWARFAcceleratorTable::validateForms() {
+  for (auto Atom : getAtomsDesc()) {
+    DWARFFormValue FormValue(Atom.second);
+    switch (Atom.first) {
+    case dwarf::DW_ATOM_die_offset:
+    case dwarf::DW_ATOM_die_tag:
+    case dwarf::DW_ATOM_type_flags:
+      if ((!FormValue.isFormClass(DWARFFormValue::FC_Constant) &&
+           !FormValue.isFormClass(DWARFFormValue::FC_Flag)) ||
+          FormValue.getForm() == dwarf::DW_FORM_sdata)
+        return false;
+    default:
+      break;
+    }
+  }
+  return true;
+}
+
+std::pair<uint32_t, dwarf::Tag>
+DWARFAcceleratorTable::readAtoms(uint32_t &HashDataOffset) {
+  uint32_t DieOffset = dwarf::DW_INVALID_OFFSET;
+  dwarf::Tag DieTag = dwarf::DW_TAG_null;
+
+  for (auto Atom : getAtomsDesc()) {
+    DWARFFormValue FormValue(Atom.second);
+    FormValue.extractValue(AccelSection, &HashDataOffset, NULL);
+    switch (Atom.first) {
+    case dwarf::DW_ATOM_die_offset:
+      DieOffset = *FormValue.getAsUnsignedConstant();
+      break;
+    case dwarf::DW_ATOM_die_tag:
+      DieTag = (dwarf::Tag)*FormValue.getAsUnsignedConstant();
+      break;
+    default:
+      break;
+    }
+  }
+  return {DieOffset, DieTag};
+}
+
 LLVM_DUMP_METHOD void DWARFAcceleratorTable::dump(raw_ostream &OS) const {
   // Dump the header.
   OS << "Magic = " << format("0x%08x", Hdr.Magic) << '\n'
@@ -121,8 +167,7 @@ LLVM_DUMP_METHOD void DWARFAcceleratorTable::dump(raw_ostream &OS) const {
         continue;
       }
       while (AccelSection.isValidOffsetForDataOfSize(DataOffset, 4)) {
-        unsigned StringOffset =
-            getRelocatedValue(AccelSection, 4, &DataOffset, &Relocs);
+        unsigned StringOffset = AccelSection.getRelocatedValue(4, &DataOffset);
         if (!StringOffset)
           break;
         OS << format("    Name: %08x \"%s\"\n", StringOffset,

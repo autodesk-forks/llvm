@@ -35,6 +35,8 @@
 using namespace llvm;
 
 LegalizerInfo::LegalizerInfo() {
+  DefaultActions[TargetOpcode::G_IMPLICIT_DEF] = NarrowScalar;
+
   // FIXME: these two can be legalized to the fundamental load/store Jakob
   // proposed. Once loads & stores are supported.
   DefaultActions[TargetOpcode::G_ANYEXT] = Legal;
@@ -178,19 +180,23 @@ Optional<LLT> LegalizerInfo::findLegalType(const InstrAspect &Aspect,
   case Libcall:
   case Custom:
     return Aspect.Type;
-  case NarrowScalar:
-    return findLegalType(Aspect,
-                         [](LLT Ty) -> LLT { return Ty.halfScalarSize(); });
-  case WidenScalar:
-    return findLegalType(Aspect, [](LLT Ty) -> LLT {
+  case NarrowScalar: {
+    return findLegalizableSize(
+        Aspect, [&](LLT Ty) -> LLT { return Ty.halfScalarSize(); });
+  }
+  case WidenScalar: {
+    return findLegalizableSize(Aspect, [&](LLT Ty) -> LLT {
       return Ty.getSizeInBits() < 8 ? LLT::scalar(8) : Ty.doubleScalarSize();
     });
-  case FewerElements:
-    return findLegalType(Aspect,
-                         [](LLT Ty) -> LLT { return Ty.halfElements(); });
-  case MoreElements:
-    return findLegalType(Aspect,
-                         [](LLT Ty) -> LLT { return Ty.doubleElements(); });
+  }
+  case FewerElements: {
+    return findLegalizableSize(
+        Aspect, [&](LLT Ty) -> LLT { return Ty.halfElements(); });
+  }
+  case MoreElements: {
+    return findLegalizableSize(
+        Aspect, [&](LLT Ty) -> LLT { return Ty.doubleElements(); });
+  }
   }
 }
 

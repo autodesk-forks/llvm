@@ -563,7 +563,7 @@ void WindowsResourceCOFFWriter::writeSymbolTable() {
     Symbol = reinterpret_cast<coff_symbol16 *>(BufferStart + CurrentOffset);
     strncpy(Symbol->Name.ShortName, RelocationName, (size_t)COFF::NameSize);
     Symbol->Value = DataOffsets[i];
-    Symbol->SectionNumber = 1;
+    Symbol->SectionNumber = 2;
     Symbol->Type = COFF::IMAGE_SYM_DTYPE_NULL;
     Symbol->StorageClass = COFF::IMAGE_SYM_CLASS_STATIC;
     Symbol->NumberOfAuxSymbols = 0;
@@ -609,8 +609,8 @@ void WindowsResourceCOFFWriter::writeDirectoryTree() {
     for (auto const &Child : StringChildren) {
       auto *Entry = reinterpret_cast<coff_resource_dir_entry *>(BufferStart +
                                                                 CurrentOffset);
-      Entry->Identifier.NameOffset =
-          StringTableOffsets[Child.second->getStringIndex()];
+      Entry->Identifier.setNameOffset(
+          StringTableOffsets[Child.second->getStringIndex()]);
       if (Child.second->checkIsDataNode()) {
         Entry->Offset.DataEntryOffset = NextLevelOffset;
         NextLevelOffset += sizeof(coff_resource_data_entry);

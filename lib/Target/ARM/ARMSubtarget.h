@@ -180,6 +180,9 @@ protected:
   /// UseSoftFloat - True if we're using software floating point features.
   bool UseSoftFloat = false;
 
+  /// UseMISched - True if MachineScheduler should be used for this subtarget.
+  bool UseMISched = false;
+
   /// HasThumb2 - True if Thumb2 instructions are supported.
   bool HasThumb2 = false;
 
@@ -245,6 +248,11 @@ protected:
   /// HasRetAddrStack - Some processors perform return stack prediction. CodeGen should
   /// avoid issue "normal" call instructions to callees which do not return.
   bool HasRetAddrStack = false;
+
+  /// HasBranchPredictor - True if the subtarget has a branch predictor. Having
+  /// a branch predictor or not changes the expected cost of taking a branch
+  /// which affects the choice of whether to use predicated instructions.
+  bool HasBranchPredictor = true;
 
   /// HasMPExtension - True if the subtarget supports Multiprocessing
   /// extension (ARMv7 only).
@@ -322,6 +330,9 @@ protected:
 
   /// If true, VFP/NEON VMLA/VMLS have special RAW hazards.
   bool HasVMLxHazards = false;
+
+  // If true, read thread pointer from coprocessor register.
+  bool ReadTPHard = false;
 
   /// If true, VMOVRS, VMOVSR and VMOVS will be converted from VFP to NEON.
   bool UseNEONForFPMovs = false;
@@ -554,6 +565,7 @@ public:
   bool cheapPredicableCPSRDef() const { return CheapPredicableCPSRDef; }
   bool avoidMOVsShifterOperand() const { return AvoidMOVsShifterOperand; }
   bool hasRetAddrStack() const { return HasRetAddrStack; }
+  bool hasBranchPredictor() const { return HasBranchPredictor; }
   bool hasMPExtension() const { return HasMPExtension; }
   bool hasDSP() const { return HasDSP; }
   bool useNaClTrap() const { return UseNaClTrap; }
@@ -639,6 +651,7 @@ public:
   bool isROPI() const;
   bool isRWPI() const;
 
+  bool useMachineScheduler() const { return UseMISched; }
   bool useSoftFloat() const { return UseSoftFloat; }
   bool isThumb() const { return InThumbMode; }
   bool isThumb1Only() const { return InThumbMode && !HasThumb2; }
@@ -647,6 +660,7 @@ public:
   bool isMClass() const { return ARMProcClass == MClass; }
   bool isRClass() const { return ARMProcClass == RClass; }
   bool isAClass() const { return ARMProcClass == AClass; }
+  bool isReadTPHard() const { return ReadTPHard; }
 
   bool isR9Reserved() const {
     return isTargetMachO() ? (ReserveR9 || !HasV6Ops) : ReserveR9;

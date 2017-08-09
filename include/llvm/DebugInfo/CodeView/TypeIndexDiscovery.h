@@ -28,11 +28,19 @@ void discoverTypeIndices(ArrayRef<uint8_t> RecordData,
                          SmallVectorImpl<TiReference> &Refs);
 void discoverTypeIndices(const CVType &Type,
                          SmallVectorImpl<TiReference> &Refs);
+void discoverTypeIndices(const CVType &Type,
+                         SmallVectorImpl<TypeIndex> &Indices);
+void discoverTypeIndices(ArrayRef<uint8_t> RecordData,
+                         SmallVectorImpl<TypeIndex> &Indices);
 
 /// Discover type indices in symbol records. Returns false if this is an unknown
 /// record.
-bool discoverTypeIndices(const CVSymbol &Symbol,
-                         SmallVectorImpl<TiReference> &Refs);
+bool discoverTypeIndicesInSymbol(const CVSymbol &Symbol,
+                                 SmallVectorImpl<TiReference> &Refs);
+bool discoverTypeIndicesInSymbol(ArrayRef<uint8_t> RecordData,
+                                 SmallVectorImpl<TiReference> &Refs);
+bool discoverTypeIndicesInSymbol(ArrayRef<uint8_t> RecordData,
+                                 SmallVectorImpl<TypeIndex> &Indices);
 }
 }
 

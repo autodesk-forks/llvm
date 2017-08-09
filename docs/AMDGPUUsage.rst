@@ -110,8 +110,7 @@ names from both the *Processor* and *Alternative Processor* can be used.
      cayman                 r600         dGPU
      **GCN GFX6 (Southern Islands (SI))** [AMD-Souther-Islands]_
      --------------------------------------------------------------------
-     gfx600     - SI        amdgcn       dGPU
-                - tahiti
+     gfx600     - tahiti    amdgcn       dGPU
      gfx601     - pitcairn  amdgcn       dGPU
                 - verde
                 - oland
@@ -190,9 +189,7 @@ names from both the *Processor* and *Alternative Processor* can be used.
      gfx810     - stoney    amdgcn       APU
      **GCN GFX9**
      --------------------------------------------------------------------
-     gfx900                 amdgcn       dGPU          - FirePro W9500
-                                                       - FirePro S9500
-                                                       - FirePro S9500x2
+     gfx900                 amdgcn       dGPU          - Radeon Vega Frontier Edition
      gfx901                 amdgcn       dGPU  ROCm    Same as gfx900
                                                        except XNACK is
                                                        enabled
